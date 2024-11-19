@@ -1,0 +1,58 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - cache.lakekeeper.io
+  resources:
+  - projects
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cache.lakekeeper.io
+  resources:
+  - projects/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - cache.lakekeeper.io
+  resources:
+  - projects/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - cache.lakekeeper.io
+  resources:
+  - warehouses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cache.lakekeeper.io
+  resources:
+  - warehouses/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - cache.lakekeeper.io
+  resources:
+  - warehouses/status
+  verbs:
+  - get
+  - patch
+  - update
