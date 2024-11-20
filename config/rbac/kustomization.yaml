@@ -20,6 +20,8 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the Project itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- lakekeeper_editor_role.yaml
+- lakekeeper_viewer_role.yaml
 - project_editor_role.yaml
 - project_viewer_role.yaml
 - warehouse_editor_role.yaml

@@ -37,8 +37,11 @@ spec:
           metadata:
             type: object
           spec:
+            description: ProjectSpec defines the desired state of Project
             properties:
               id:
+                description: Foo is an example field of Project. Edit project_types.go
+                  to remove/update
                 type: string
             type: object
           status:

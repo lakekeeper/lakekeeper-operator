@@ -1,0 +1,23 @@
+# permissions for end users to view lakekeepers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: lakekeeper-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: lakekeeper-viewer-role
+rules:
+- apiGroups:
+  - cache.lakekeeper.io
+  resources:
+  - lakekeepers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - cache.lakekeeper.io
+  resources:
+  - lakekeepers/status
+  verbs:
+  - get

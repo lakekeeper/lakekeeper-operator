@@ -1,0 +1,16 @@
+apiVersion: cache.lakekeeper.io/v1alpha1
+kind: Lakekeeper
+metadata:
+  labels:
+    app.kubernetes.io/name: lakekeeper-operator
+    app.kubernetes.io/version: 0.4.3
+    app.kubernetes.io/managed-by: LakekeeperController
+  name: lakekeeper-sample
+spec:
+  catalog:
+    replicas: 1
+    image:
+      tag: v0.4.3
+      repository: quay.io/lakekeeper/catalog
+
+  # TODO(user): Add fields here

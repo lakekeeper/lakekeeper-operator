@@ -4,6 +4,7 @@
 resources:
 - bases/cache.lakekeeper.io_warehouses.yaml
 - bases/cache.lakekeeper.io_projects.yaml
+- bases/cache.lakekeeper.io_lakekeepers.yaml
 #+kubebuilder:scaffold:crdkustomizeresource
 
 patches:
@@ -15,6 +16,7 @@ patches:
 # patches here are for enabling the CA injection for each CRD
 #- path: patches/cainjection_in_warehouses.yaml
 #- path: patches/cainjection_in_projects.yaml
+#- path: patches/cainjection_in_lakekeepers.yaml
 #+kubebuilder:scaffold:crdkustomizecainjectionpatch
 
 # [WEBHOOK] To enable webhook, uncomment the following section
