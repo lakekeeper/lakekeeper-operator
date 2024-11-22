@@ -1,10 +1,11 @@
----
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  name: lakekeepers.cache.lakekeeper.io
   annotations:
     controller-gen.kubebuilder.io/version: v0.14.0
-  name: lakekeepers.cache.lakekeeper.io
+  labels:
+  {{- include "lakekeeper-operator.labels" . | nindent 4 }}
 spec:
   group: cache.lakekeeper.io
   names:
@@ -44,15 +45,14 @@ spec:
                   oauth2:
                     properties:
                       client_id:
-                        description: The client id of the OIDC App of the catalog.
-                          The aud (audience) claim of the JWT token must match this
-                          id.
+                        description: The client id of the OIDC App of the catalog. The
+                          aud (audience) claim of the JWT token must match this id.
                         type: string
                       provider_uri:
-                        description: 'If set, access to rest endpoints is secured
-                          via an external OIDC-capable IdP. The IdP must expose {provider_url}/.well-known/openid-configuration
-                          and the openid-configuration needs to have the jwks_uri
-                          and issuer defined. For keycloak set: https://keycloak.local/realms/test
+                        description: 'If set, access to rest endpoints is secured via
+                          an external OIDC-capable IdP. The IdP must expose {provider_url}/.well-known/openid-configuration
+                          and the openid-configuration needs to have the jwks_uri and
+                          issuer defined. For keycloak set: https://keycloak.local/realms/test
                           For Entra-ID set: https://login.microsoftonline.com/{your-tenant-id}/v2.0'
                         type: string
                     required:
@@ -110,3 +110,9 @@ spec:
     storage: true
     subresources:
       status: {}
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: []
+  storedVersions: []

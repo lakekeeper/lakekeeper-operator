@@ -320,3 +320,7 @@ catalog-build: opm ## Build a catalog image.
 .PHONY: catalog-push
 catalog-push: ## Push a catalog image.
 	$(MAKE) docker-push IMG=$(CATALOG_IMG)
+
+.PHONY: helm-build
+helm-build:
+	$(KUSTOMIZE) build config/default | go run github.com/arttor/helmify/cmd/helmify config/helm-charts/lakekeeper-operator

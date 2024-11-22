@@ -1,8 +1,9 @@
----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: manager-role
+  name: {{ include "lakekeeper-operator.fullname" . }}-manager-role
+  labels:
+  {{- include "lakekeeper-operator.labels" . | nindent 4 }}
 rules:
 - apiGroups:
   - apps
@@ -115,3 +116,18 @@ rules:
   - patch
   - update
   - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "lakekeeper-operator.fullname" . }}-manager-rolebinding
+  labels:
+  {{- include "lakekeeper-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: '{{ include "lakekeeper-operator.fullname" . }}-manager-role'
+subjects:
+- kind: ServiceAccount
+  name: '{{ include "lakekeeper-operator.fullname" . }}-controller-manager'
+  namespace: '{{ .Release.Namespace }}'

@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -40,43 +41,74 @@ type LakekeeperReconciler struct {
 //+kubebuilder:rbac:groups=cache.lakekeeper.io,resources=lakekeepers,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=cache.lakekeeper.io,resources=lakekeepers/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=cache.lakekeeper.io,resources=lakekeepers/finalizers,verbs=update
+//+kubebuilder:rbac:groups=apps,resources=deployments;services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
-//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+//+kubebuilder:rbac:groups=core,resources=services;pods,verbs=create;update;patch;delete;get;list;watch
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Lakekeeper object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.17.3/pkg/reconcile
 func (r *LakekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	lakekeeper := &cachev1alpha1.Lakekeeper{}
 	err := r.Get(ctx, req.NamespacedName, lakekeeper)
 	if err != nil {
-		log.Error(err, "unable to fetch lakekeeper")
+		logger.Error(err, "unable to fetch lakekeeper")
 		return ctrl.Result{}, nil
 	}
 
+	// Create Lakekeeper deployment if not found
 	found := &appsv1.Deployment{}
 	err = r.Get(ctx, types.NamespacedName{Name: lakekeeper.Name, Namespace: lakekeeper.Namespace}, found)
 	if err != nil && errors.IsNotFound(err) {
 		dep, err := r.getLakekeeperDeployment(lakekeeper)
 		if err != nil {
-			log.Error(err, "unable to fetch deployment")
+			logger.Error(err, "unable to fetch deployment")
 		}
-		log.Info("creating deployment", "namespace", lakekeeper.Namespace, "name", lakekeeper.Name)
+		logger.Info("creating deployment", "namespace", lakekeeper.Namespace, "name", lakekeeper.Name)
 		err = r.Create(ctx, dep)
 		if err != nil {
-			log.Error(err, "unable to create deployment", "namespace", lakekeeper.Namespace, "name", lakekeeper.Name)
+			logger.Error(err, "unable to create deployment", "namespace", lakekeeper.Namespace, "name", lakekeeper.Name)
+		}
+	}
+
+	// Create Lakekeeper service if not found
+	foundService := &v1.Service{}
+	err = r.Get(ctx, types.NamespacedName{Name: lakekeeper.Name, Namespace: lakekeeper.Namespace}, foundService)
+	if err != nil && errors.IsNotFound(err) {
+		svc, err := r.getLakekeeperService(lakekeeper)
+		if err != nil {
+			logger.Error(err, "unable to fetch service")
+		}
+		logger.Info("creating service", "namespace", lakekeeper.Namespace, "name", lakekeeper.Name)
+		err = r.Create(ctx, svc)
+		if err != nil {
+			logger.Error(err, "unable to create service", "namespace", lakekeeper.Namespace, "name", lakekeeper.Name)
 		}
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *LakekeeperReconciler) getLakekeeperService(lakekeeper *cachev1alpha1.Lakekeeper) (*v1.Service, error) {
+	service := &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      lakekeeper.Name,
+			Namespace: lakekeeper.Namespace,
+		},
+		Spec: v1.ServiceSpec{
+			Ports: []v1.ServicePort{
+				{
+					Port: 8095,
+					TargetPort: intstr.IntOrString{
+						IntVal: 8080,
+					},
+				},
+			},
+			Type: v1.ServiceTypeLoadBalancer,
+		},
+	}
+	if err := ctrl.SetControllerReference(lakekeeper, service, r.Scheme); err != nil {
+		return nil, err
+	}
+	return service, nil
 }
 
 func (r *LakekeeperReconciler) getLakekeeperDeployment(lakekeeper *cachev1alpha1.Lakekeeper) (*appsv1.Deployment, error) {
@@ -100,6 +132,9 @@ func (r *LakekeeperReconciler) getLakekeeperDeployment(lakekeeper *cachev1alpha1
 							Image:           lakekeeper.Spec.Catalog.Image.Repository + ":" + lakekeeper.Spec.Catalog.Image.Tag,
 							Name:            lakekeeper.Name,
 							ImagePullPolicy: v1.PullIfNotPresent,
+							Args: []string{
+								"serve",
+							},
 						},
 					},
 				},
@@ -124,5 +159,7 @@ func labelsForLakekeeper() map[string]string {
 func (r *LakekeeperReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cachev1alpha1.Lakekeeper{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&v1.Service{}).
 		Complete(r)
 }

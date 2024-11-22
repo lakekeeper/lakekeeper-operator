@@ -41,10 +41,10 @@ type LakekeeperImage struct {
 	Gid int32 `json:"gid,omitempty"`
 	// The image pull policy
 	//+kubebuilder:default="IfNotPresent"
-	PullPolicy string `json:"pullPolicy,omitempty"`
+	PullPolicy string `json:"pullPolicy"`
 	// The image repository to pull from
 	//+kubebuilder:default="quay.io/lakekeeper/catalog"
-	Repository string `json:"repository,omitempty"`
+	Repository string `json:"repository"`
 	// The image tag to pull
 	//+kubebuilder:default="v0.4.3"
 	Tag string `json:"tag"`
@@ -54,10 +54,10 @@ type LakekeeperImage struct {
 }
 
 type LakekeeperCatalog struct {
-	Image LakekeeperImage `json:"image,omitempty"`
+	Image LakekeeperImage `json:"image"`
 	// Number of replicas to deploy. Replicas are stateless.
 	//+kubebuilder:default=1
-	Replicas int32 `json:"replicas,omitempty"`
+	Replicas int32 `json:"replicas"`
 }
 
 // LakekeeperSpec defines the desired state of Lakekeeper
