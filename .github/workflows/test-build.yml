@@ -1,0 +1,17 @@
+name: Test Build
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Create Generated Files
+      run: make manifests
+
+    - name: Test Build
+      run: make docker-build
