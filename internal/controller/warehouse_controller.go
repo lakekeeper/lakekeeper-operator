@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	cachev1alpha1 "github.com/peter-mcclonski/lakekeeper-operator/api/v1alpha1"
+	cachev1alpha1 "github.com/lakekeeper/lakekeeper-operator/api/v1alpha1"
 )
 
 // WarehouseReconciler reconciles a Warehouse object

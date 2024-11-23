@@ -24,7 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/peter-mcclonski/lakekeeper-operator/test/utils"
+	"github.com/lakekeeper/lakekeeper-operator/test/utils"
 )
 
 const namespace = "lakekeeper-operator-system"

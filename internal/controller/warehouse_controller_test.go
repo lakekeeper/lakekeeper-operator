@@ -27,7 +27,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cachev1alpha1 "github.com/peter-mcclonski/lakekeeper-operator/api/v1alpha1"
+	cachev1alpha1 "github.com/lakekeeper/lakekeeper-operator/api/v1alpha1"
 )
 
 var _ = Describe("Warehouse Controller", func() {

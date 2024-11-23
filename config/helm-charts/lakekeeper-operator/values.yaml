@@ -47,7 +47,7 @@ controllerManager:
         drop:
         - ALL
     image:
-      repository: pmcclonski/lakekeeper-operator
+      repository: lakekeeper/lakekeeper-operator
       tag: latest
     resources:
       limits:

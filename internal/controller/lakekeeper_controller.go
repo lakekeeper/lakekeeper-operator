@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"strconv"
 
-	cachev1alpha1 "github.com/peter-mcclonski/lakekeeper-operator/api/v1alpha1"
+	cachev1alpha1 "github.com/lakekeeper/lakekeeper-operator/api/v1alpha1"
 )
 
 // LakekeeperReconciler reconciles a Lakekeeper object
