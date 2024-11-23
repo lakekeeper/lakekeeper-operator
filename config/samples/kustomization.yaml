@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- cache_v1alpha1_warehouse.yaml
+- cache_v1alpha1_project.yaml
+- cache_v1alpha1_lakekeeper.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples

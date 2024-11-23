@@ -1,0 +1,9 @@
+apiVersion: cache.lakekeeper.io/v1alpha1
+kind: Project
+metadata:
+  labels:
+    app.kubernetes.io/name: lakekeeper-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: project-sample
+spec:
+  id: "my-project"
