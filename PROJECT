@@ -9,7 +9,7 @@ plugins:
   manifests.sdk.operatorframework.io/v2: {}
   scorecard.sdk.operatorframework.io/v2: {}
 projectName: lakekeeper-operator
-repo: github.com/peter-mcclonski/lakekeeper-operator
+repo: github.com/lakekeeper/lakekeeper-operator
 resources:
 - api:
     crdVersion: v1
@@ -18,7 +18,7 @@ resources:
   domain: lakekeeper.io
   group: cache
   kind: Warehouse
-  path: github.com/peter-mcclonski/lakekeeper-operator/api/v1alpha1
+  path: github.com/lakekeeper/lakekeeper-operator/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -27,7 +27,7 @@ resources:
   domain: lakekeeper.io
   group: cache
   kind: Project
-  path: github.com/peter-mcclonski/lakekeeper-operator/api/v1alpha1
+  path: github.com/lakekeeper/lakekeeper-operator/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -36,6 +36,6 @@ resources:
   domain: lakekeeper.io
   group: cache
   kind: Lakekeeper
-  path: github.com/peter-mcclonski/lakekeeper-operator/api/v1alpha1
+  path: github.com/lakekeeper/lakekeeper-operator/api/v1alpha1
   version: v1alpha1
 version: "3"

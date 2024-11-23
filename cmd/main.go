@@ -34,8 +34,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	cachev1alpha1 "github.com/peter-mcclonski/lakekeeper-operator/api/v1alpha1"
-	"github.com/peter-mcclonski/lakekeeper-operator/internal/controller"
+	cachev1alpha1 "github.com/lakekeeper/lakekeeper-operator/api/v1alpha1"
+	"github.com/lakekeeper/lakekeeper-operator/internal/controller"
 	//+kubebuilder:scaffold:imports
 )
 

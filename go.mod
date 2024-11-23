@@ -1,4 +1,4 @@
-module github.com/peter-mcclonski/lakekeeper-operator
+module github.com/lakekeeper/lakekeeper-operator
 
 go 1.21
 
