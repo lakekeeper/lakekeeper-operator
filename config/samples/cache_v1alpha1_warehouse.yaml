@@ -1,0 +1,10 @@
+apiVersion: cache.lakekeeper.io/v1alpha1
+kind: Warehouse
+metadata:
+  labels:
+    app.kubernetes.io/name: lakekeeper-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: warehouse-sample
+spec:
+  name: "my-warehouse"
+  # TODO(user): Add fields here
