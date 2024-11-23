@@ -60,10 +60,36 @@ type LakekeeperCatalog struct {
 	Replicas int32 `json:"replicas"`
 }
 
+type LakekeeperExternalDB struct {
+	//+kubebuilder:default="catalog"
+	Database string `json:"database"`
+	//+kubebuilder:default="localhost"
+	HostRead string `json:"host_read"`
+	//+kubebuilder:default="localhost"
+	HostWrite string `json:"host_write"`
+	//+kubebuilder:default=""
+	Password string `json:"password"`
+	//+kubebuilder:default=""
+	PasswordSecret string `json:"passwordSecret"`
+	//+kubebuilder:default="postgresql-password"
+	PasswordSecretKey string `json:"passwordSecretKey"`
+	//+kubebuilder:default=5432
+	Port int32 `json:"port"`
+	//+kubebuilder:default="postgres"
+	Type string `json:"type"`
+	//+kubebuilder:default="catalog"
+	User string `json:"user"`
+	//+kubebuilder:default=""
+	UserSecret string `json:"userSecret"`
+	//+kubebuilder:default="postgresql-user"
+	UserSecretKey string `json:"userSecretKey"`
+}
+
 // LakekeeperSpec defines the desired state of Lakekeeper
 type LakekeeperSpec struct {
-	Auth    LakekeeperAuth    `json:"auth,omitempty"`
-	Catalog LakekeeperCatalog `json:"catalog,omitempty"`
+	Auth             LakekeeperAuth       `json:"auth,omitempty"`
+	Catalog          LakekeeperCatalog    `json:"catalog,omitempty"`
+	ExternalDatabase LakekeeperExternalDB `json:"externalDatabase,omitempty"`
 }
 
 // LakekeeperStatus defines the observed state of Lakekeeper

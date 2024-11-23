@@ -1,3 +1,19 @@
+postgresql:
+  enabled: true
+  auth:
+    database: "catalog"
+    existingSecret: ""
+    password: ""
+    secretKeys:
+      adminPasswordKey: "postgres-password"
+      userPasswordKey: "password"
+    username: "catalog"
+  persistence:
+    accessModes: ["ReadWriteOnce"]
+    enabled: true
+    size: "5Gi"
+    storageClass: ""
+
 controllerManager:
   kubeRbacProxy:
     args:

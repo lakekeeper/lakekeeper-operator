@@ -28,6 +28,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"strconv"
 
 	cachev1alpha1 "github.com/peter-mcclonski/lakekeeper-operator/api/v1alpha1"
 )
@@ -41,9 +42,9 @@ type LakekeeperReconciler struct {
 //+kubebuilder:rbac:groups=cache.lakekeeper.io,resources=lakekeepers,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=cache.lakekeeper.io,resources=lakekeepers/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=cache.lakekeeper.io,resources=lakekeepers/finalizers,verbs=update
-//+kubebuilder:rbac:groups=apps,resources=deployments;services,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps,resources=secrets;deployments;services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
-//+kubebuilder:rbac:groups=core,resources=services;pods,verbs=create;update;patch;delete;get;list;watch
+//+kubebuilder:rbac:groups=core,resources=secrets;services;pods,verbs=create;update;patch;delete;get;list;watch
 
 func (r *LakekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -67,6 +68,25 @@ func (r *LakekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		err = r.Create(ctx, dep)
 		if err != nil {
 			logger.Error(err, "unable to create deployment", "namespace", lakekeeper.Namespace, "name", lakekeeper.Name)
+		}
+	}
+
+	// Create Lakekeeper config secret if not found
+	foundSecret := &v1.Secret{}
+	err = r.Get(ctx, types.NamespacedName{
+		Namespace: lakekeeper.Namespace,
+		Name:      lakekeeper.Name,
+	}, foundSecret)
+
+	if err != nil && errors.IsNotFound(err) {
+		sec, err := r.getLakekeeperConfigSecret(lakekeeper)
+		if err != nil {
+			logger.Error(err, "unable to fetch secret")
+		}
+		logger.Info("creating secret", "namespace", lakekeeper.Namespace, "name", lakekeeper.Name)
+		err = r.Create(ctx, sec)
+		if err != nil {
+			logger.Error(err, "unable to create secret", "namespace", lakekeeper.Namespace, "name", lakekeeper.Name)
 		}
 	}
 
@@ -111,6 +131,27 @@ func (r *LakekeeperReconciler) getLakekeeperService(lakekeeper *cachev1alpha1.La
 	return service, nil
 }
 
+func (r *LakekeeperReconciler) getLakekeeperConfigSecret(lakekeeper *cachev1alpha1.Lakekeeper) (*v1.Secret, error) {
+	secret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      lakekeeper.Name + "-config-envs",
+			Namespace: lakekeeper.Namespace,
+		},
+		Data: map[string][]byte{
+			"ICEBERG_REST__PG_HOST_R":   []byte("postgres-postgresql"),
+			"ICEBERG_REST__PG_HOST_W":   []byte("postgres-postgresql"),
+			"ICEBERG_REST__PG_PORT":     []byte(strconv.Itoa(int(lakekeeper.Spec.ExternalDatabase.Port))),
+			"ICEBERG_REST__PG_USER":     []byte(lakekeeper.Spec.ExternalDatabase.User),
+			"ICEBERG_REST__PG_PASSWORD": []byte(lakekeeper.Spec.ExternalDatabase.Password),
+			"ICEBERG_REST__PG_DATABASE": []byte(lakekeeper.Spec.ExternalDatabase.Database),
+		},
+	}
+	if err := ctrl.SetControllerReference(lakekeeper, secret, r.Scheme); err != nil {
+		return nil, err
+	}
+	return secret, nil
+}
+
 func (r *LakekeeperReconciler) getLakekeeperDeployment(lakekeeper *cachev1alpha1.Lakekeeper) (*appsv1.Deployment, error) {
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -134,6 +175,15 @@ func (r *LakekeeperReconciler) getLakekeeperDeployment(lakekeeper *cachev1alpha1
 							ImagePullPolicy: v1.PullIfNotPresent,
 							Args: []string{
 								"serve",
+							},
+							EnvFrom: []v1.EnvFromSource{
+								{
+									SecretRef: &v1.SecretEnvSource{
+										LocalObjectReference: v1.LocalObjectReference{
+											Name: lakekeeper.Name + "-config-envs",
+										},
+									},
+								},
 							},
 						},
 					},

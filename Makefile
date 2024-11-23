@@ -324,3 +324,15 @@ catalog-push: ## Push a catalog image.
 .PHONY: helm-build
 helm-build:
 	$(KUSTOMIZE) build config/default | go run github.com/arttor/helmify/cmd/helmify config/helm-charts/lakekeeper-operator
+
+.PHONY: deploy-db
+deploy-db:
+	helm install postgres oci://registry-1.docker.io/bitnamicharts/postgresql --set auth.database="catalog" --set auth.existingSecret="" --set auth.password="" --set auth.secretKeys.adminPasswordKey="postgres-password" --set auth.secretKeys.userPasswordKey="password" --set auth.username="catalog" --set persistence.accessModes="ReadWriteOnce" --set persistence.enabled=true --set persistence.size="5Gi" --set persistence.storageClass=""
+
+.PHONY: undeploy-db
+undeploy-db:
+	helm uninstall postgres
+
+.PHONY: deploy-sample
+deploy-sample:
+	kubectl apply -f config/samples/cache_v1alpha1_lakekeeper.yaml

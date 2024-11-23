@@ -12,5 +12,7 @@ spec:
     image:
       tag: v0.4.3
       repository: quay.io/lakekeeper/catalog
+  externalDatabase:
+    port: 5432
 
   # TODO(user): Add fields here

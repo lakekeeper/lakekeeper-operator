@@ -101,6 +101,55 @@ spec:
                 - image
                 - replicas
                 type: object
+              externalDatabase:
+                properties:
+                  database:
+                    default: catalog
+                    type: string
+                  host_read:
+                    default: localhost
+                    type: string
+                  host_write:
+                    default: localhost
+                    type: string
+                  password:
+                    default: ""
+                    type: string
+                  passwordSecret:
+                    default: ""
+                    type: string
+                  passwordSecretKey:
+                    default: postgresql-password
+                    type: string
+                  port:
+                    default: 5432
+                    format: int32
+                    type: integer
+                  type:
+                    default: postgres
+                    type: string
+                  user:
+                    default: catalog
+                    type: string
+                  userSecret:
+                    default: ""
+                    type: string
+                  userSecretKey:
+                    default: postgresql-user
+                    type: string
+                required:
+                - database
+                - host_read
+                - host_write
+                - password
+                - passwordSecret
+                - passwordSecretKey
+                - port
+                - type
+                - user
+                - userSecret
+                - userSecretKey
+                type: object
             type: object
           status:
             description: LakekeeperStatus defines the observed state of Lakekeeper
