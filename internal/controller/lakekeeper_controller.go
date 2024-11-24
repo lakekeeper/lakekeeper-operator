@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,9 +43,10 @@ type LakekeeperReconciler struct {
 //+kubebuilder:rbac:groups=cache.lakekeeper.io,resources=lakekeepers,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=cache.lakekeeper.io,resources=lakekeepers/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=cache.lakekeeper.io,resources=lakekeepers/finalizers,verbs=update
-//+kubebuilder:rbac:groups=apps,resources=secrets;deployments;services,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps,resources=secrets;deployments;services;jobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=core,resources=secrets;services;pods,verbs=create;update;patch;delete;get;list;watch
+//+kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;update;patch;delete;get;list;watch
 
 func (r *LakekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -54,6 +56,21 @@ func (r *LakekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		logger.Error(err, "unable to fetch lakekeeper")
 		return ctrl.Result{}, nil
+	}
+
+	// Create db migration job if not found
+	foundMigrationJob := &batchv1.Job{}
+	err = r.Get(ctx, types.NamespacedName{Namespace: lakekeeper.GetNamespace(), Name: "migrate-db"}, foundMigrationJob)
+	if err != nil && errors.IsNotFound(err) {
+		job, err := r.getDbMigrationJob(lakekeeper)
+		if err != nil {
+			logger.Error(err, "unable to get migration job")
+		}
+		logger.Info("creating migration job", "job", job)
+		err = r.Create(ctx, job)
+		if err != nil {
+			logger.Error(err, "unable to create migration job")
+		}
 	}
 
 	// Create Lakekeeper deployment if not found
@@ -105,6 +122,71 @@ func (r *LakekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *LakekeeperReconciler) getDbMigrationJob(lakekeeper *cachev1alpha1.Lakekeeper) (*batchv1.Job, error) {
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "migrate-db",
+			Namespace: lakekeeper.Namespace,
+		},
+		Spec: batchv1.JobSpec{
+			Template: v1.PodTemplateSpec{
+				Spec: v1.PodSpec{
+					RestartPolicy: v1.RestartPolicyOnFailure,
+					InitContainers: []v1.Container{
+						{
+							Image: lakekeeper.Spec.Catalog.Image.Repository + ":" + lakekeeper.Spec.Catalog.Image.Tag,
+							Name:  "check-db",
+							EnvFrom: []v1.EnvFromSource{
+								{
+									SecretRef: &v1.SecretEnvSource{
+										LocalObjectReference: v1.LocalObjectReference{
+											// TODO: Remove hardcoding
+											Name: lakekeeper.Name + "-config-envs",
+										},
+									},
+								},
+							},
+							Args: []string{
+								"wait-for-db",
+								"-d",
+								"-r",
+								"100",
+								"-b",
+								"2",
+							},
+						},
+					},
+					Containers: []v1.Container{
+						{
+							Name:  "migrate-db",
+							Image: lakekeeper.Spec.Catalog.Image.Repository + ":" + lakekeeper.Spec.Catalog.Image.Tag,
+							Args: []string{
+								"migrate",
+							},
+							EnvFrom: []v1.EnvFromSource{
+								{
+									SecretRef: &v1.SecretEnvSource{
+										LocalObjectReference: v1.LocalObjectReference{
+											// TODO: Remove hardcoding
+											Name: lakekeeper.Name + "-config-envs",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(lakekeeper, job, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return job, nil
 }
 
 func (r *LakekeeperReconciler) getLakekeeperService(lakekeeper *cachev1alpha1.Lakekeeper) (*v1.Service, error) {
@@ -204,6 +286,30 @@ func (r *LakekeeperReconciler) getLakekeeperDeployment(lakekeeper *cachev1alpha1
 					Labels: labelsForLakekeeper(),
 				},
 				Spec: v1.PodSpec{
+					InitContainers: []v1.Container{
+						{
+							Image: lakekeeper.Spec.Catalog.Image.Repository + ":" + lakekeeper.Spec.Catalog.Image.Tag,
+							Name:  "check-db",
+							EnvFrom: []v1.EnvFromSource{
+								{
+									SecretRef: &v1.SecretEnvSource{
+										LocalObjectReference: v1.LocalObjectReference{
+											// TODO: Remove hardcoding
+											Name: lakekeeper.Name + "-config-envs",
+										},
+									},
+								},
+							},
+							Args: []string{
+								"wait-for-db",
+								"-dm",
+								"-r",
+								"100",
+								"-b",
+								"2",
+							},
+						},
+					},
 					Containers: []v1.Container{
 						{
 							Image:           lakekeeper.Spec.Catalog.Image.Repository + ":" + lakekeeper.Spec.Catalog.Image.Tag,
