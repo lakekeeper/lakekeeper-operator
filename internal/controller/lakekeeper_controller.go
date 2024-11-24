@@ -79,7 +79,7 @@ func (r *LakekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}, foundSecret)
 
 	if err != nil && errors.IsNotFound(err) {
-		sec, err := r.getLakekeeperConfigSecret(lakekeeper)
+		sec, err := r.getLakekeeperConfigSecret(lakekeeper, ctx)
 		if err != nil {
 			logger.Error(err, "unable to fetch secret")
 		}
@@ -108,21 +108,29 @@ func (r *LakekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 
 func (r *LakekeeperReconciler) getLakekeeperService(lakekeeper *cachev1alpha1.Lakekeeper) (*v1.Service, error) {
+	nodeport, _ := strconv.ParseInt(lakekeeper.Spec.Catalog.Service.NodePort["http"], 10, 32)
 	service := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      lakekeeper.Name,
-			Namespace: lakekeeper.Namespace,
+			Name:        lakekeeper.Name,
+			Namespace:   lakekeeper.Namespace,
+			Annotations: lakekeeper.Spec.Catalog.Service.Annotations,
+			Labels:      lakekeeper.Spec.Catalog.Service.Labels,
 		},
 		Spec: v1.ServiceSpec{
 			Ports: []v1.ServicePort{
 				{
-					Port: 8095,
+					Port: lakekeeper.Spec.Catalog.Service.ExternalPort,
 					TargetPort: intstr.IntOrString{
 						IntVal: 8080,
 					},
+					NodePort: int32(nodeport),
 				},
 			},
-			Type: v1.ServiceTypeLoadBalancer,
+			Type:            v1.ServiceType(lakekeeper.Spec.Catalog.Service.Type),
+			SessionAffinity: v1.ServiceAffinity(lakekeeper.Spec.Catalog.Service.SessionAffinity),
+
+			// TODO: Deprecated.  Implementing only for parity with the helm chart deployment
+			LoadBalancerIP: lakekeeper.Spec.Catalog.Service.LoadBalancerIP,
 		},
 	}
 	if err := ctrl.SetControllerReference(lakekeeper, service, r.Scheme); err != nil {
@@ -131,24 +139,52 @@ func (r *LakekeeperReconciler) getLakekeeperService(lakekeeper *cachev1alpha1.La
 	return service, nil
 }
 
-func (r *LakekeeperReconciler) getLakekeeperConfigSecret(lakekeeper *cachev1alpha1.Lakekeeper) (*v1.Secret, error) {
+func (r *LakekeeperReconciler) getLakekeeperConfigSecret(lakekeeper *cachev1alpha1.Lakekeeper, ctx context.Context) (*v1.Secret, error) {
+	data := map[string][]byte{
+		"ICEBERG_REST__PG_PORT": []byte(strconv.Itoa(int(lakekeeper.Spec.ExternalDatabase.Port))),
+	}
+
+	if lakekeeper.Spec.ExternalDatabase.User != "" {
+		data["ICEBERG_REST__PG_USER"] = []byte(lakekeeper.Spec.ExternalDatabase.User)
+	} else if lakekeeper.Spec.ExternalDatabase.UserSecret != "" {
+		secret := &v1.Secret{}
+		_ = r.Get(ctx, types.NamespacedName{Name: lakekeeper.Spec.ExternalDatabase.UserSecret, Namespace: lakekeeper.Namespace}, secret)
+		data["ICEBERG_REST__PG_USER"] = secret.Data[lakekeeper.Spec.ExternalDatabase.UserSecretKey]
+	}
+
+	if lakekeeper.Spec.ExternalDatabase.Password != "" {
+		data["ICEBERG_REST__PG_PASSWORD"] = []byte(lakekeeper.Spec.ExternalDatabase.Password)
+	} else if lakekeeper.Spec.ExternalDatabase.PasswordSecret != "" {
+		// TODO: Error handling/logging
+		secret := &v1.Secret{}
+		_ = r.Get(ctx, types.NamespacedName{Name: lakekeeper.Spec.ExternalDatabase.PasswordSecret, Namespace: lakekeeper.Namespace}, secret)
+		data["ICEBERG_REST__PG_PASSWORD"] = secret.Data[lakekeeper.Spec.ExternalDatabase.PasswordSecretKey]
+	}
+
+	if lakekeeper.Spec.ExternalDatabase.Database != "" {
+		data["ICEBERG_REST__PG_DATABASE"] = []byte(lakekeeper.Spec.ExternalDatabase.Database)
+	}
+
+	if lakekeeper.Spec.ExternalDatabase.HostRead != "" {
+		data["ICEBERG_REST__PG_HOST_R"] = []byte(lakekeeper.Spec.ExternalDatabase.HostRead)
+	}
+
+	if lakekeeper.Spec.ExternalDatabase.HostWrite != "" {
+		data["ICEBERG_REST__PG_HOST_W"] = []byte(lakekeeper.Spec.ExternalDatabase.HostWrite)
+	}
+
 	secret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      lakekeeper.Name + "-config-envs",
 			Namespace: lakekeeper.Namespace,
 		},
-		Data: map[string][]byte{
-			"ICEBERG_REST__PG_HOST_R":   []byte("postgres-postgresql"),
-			"ICEBERG_REST__PG_HOST_W":   []byte("postgres-postgresql"),
-			"ICEBERG_REST__PG_PORT":     []byte(strconv.Itoa(int(lakekeeper.Spec.ExternalDatabase.Port))),
-			"ICEBERG_REST__PG_USER":     []byte(lakekeeper.Spec.ExternalDatabase.User),
-			"ICEBERG_REST__PG_PASSWORD": []byte(lakekeeper.Spec.ExternalDatabase.Password),
-			"ICEBERG_REST__PG_DATABASE": []byte(lakekeeper.Spec.ExternalDatabase.Database),
-		},
+		Data: data,
 	}
+
 	if err := ctrl.SetControllerReference(lakekeeper, secret, r.Scheme); err != nil {
 		return nil, err
 	}
+
 	return secret, nil
 }
 
@@ -172,7 +208,7 @@ func (r *LakekeeperReconciler) getLakekeeperDeployment(lakekeeper *cachev1alpha1
 						{
 							Image:           lakekeeper.Spec.Catalog.Image.Repository + ":" + lakekeeper.Spec.Catalog.Image.Tag,
 							Name:            lakekeeper.Name,
-							ImagePullPolicy: v1.PullIfNotPresent,
+							ImagePullPolicy: v1.PullPolicy(lakekeeper.Spec.Catalog.Image.PullPolicy),
 							Args: []string{
 								"serve",
 							},
@@ -180,6 +216,7 @@ func (r *LakekeeperReconciler) getLakekeeperDeployment(lakekeeper *cachev1alpha1
 								{
 									SecretRef: &v1.SecretEnvSource{
 										LocalObjectReference: v1.LocalObjectReference{
+											// TODO: Remove hardcoding
 											Name: lakekeeper.Name + "-config-envs",
 										},
 									},

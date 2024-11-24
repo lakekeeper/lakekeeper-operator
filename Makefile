@@ -1,3 +1,9 @@
+# Include a dotenv file if there is one
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
+
 # VERSION defines the project version for the bundle.
 # Update this value when you upgrade the version of your project.
 # To re-generate a bundle for another specific version without changing the standard setup, you can:

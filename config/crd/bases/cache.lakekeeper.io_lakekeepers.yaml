@@ -97,9 +97,54 @@ spec:
                     description: Number of replicas to deploy. Replicas are stateless.
                     format: int32
                     type: integer
+                  service:
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: Catalog service annotations
+                        type: object
+                      externalPort:
+                        default: 8080
+                        description: catalog service external port
+                        format: int32
+                        type: integer
+                      labels:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      loadBalancerIP:
+                        default: ""
+                        description: 'catalog service ip of the load balancer service.
+                          Only used when type: LoadBalancer'
+                        type: string
+                      loadBalancerSourceRanges:
+                        description: 'Source ip ranges for the catalog services. Only
+                          used when type: LoadBalancer'
+                        items:
+                          type: string
+                        type: array
+                      nodePort:
+                        additionalProperties:
+                          type: string
+                        description: 'catalog service node port Only used when type:
+                          NodePort'
+                        type: object
+                      sessionAffinity:
+                        description: catalog service session affinity
+                        type: string
+                      sessionAffinityConfig:
+                        description: catalog service session affinity config
+                        type: string
+                      type:
+                        default: ClusterIP
+                        description: catalog service type
+                        type: string
+                    type: object
                 required:
                 - image
                 - replicas
+                - service
                 type: object
               externalDatabase:
                 properties:
@@ -108,9 +153,14 @@ spec:
                     type: string
                   host_read:
                     default: localhost
+                    description: hostname to use for read instances of the external
+                      database
                     type: string
                   host_write:
                     default: localhost
+                    description: hostname to use for write instances of the external
+                      database. For single read/write instances, this should be the
+                      same as host_read
                     type: string
                   password:
                     default: ""
@@ -127,6 +177,7 @@ spec:
                     type: integer
                   type:
                     default: postgres
+                    description: 'the type of external database. allowed values: "postgres"'
                     type: string
                   user:
                     default: catalog

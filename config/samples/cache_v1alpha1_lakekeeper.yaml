@@ -12,7 +12,16 @@ spec:
     image:
       tag: v0.4.3
       repository: quay.io/lakekeeper/catalog
+    service:
+      type: LoadBalancer
+      externalPort: 8095
   externalDatabase:
     port: 5432
+    host_read: "postgres-postgresql"
+    host_write: "postgres-postgresql"
+    database: "catalog"
+    passwordSecret: "postgres-postgresql"
+    passwordSecretKey: "password"
+    user: "catalog"
 
-  # TODO(user): Add fields here
+

@@ -53,18 +53,44 @@ type LakekeeperImage struct {
 	Uid int32 `json:"uid"`
 }
 
+type LakekeeperService struct {
+	// Catalog service annotations
+	Annotations map[string]string `json:"annotations,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	// catalog service external port
+	//+kubebuilder:default=8080
+	ExternalPort int32 `json:"externalPort,omitempty"`
+	// catalog service ip of the load balancer service. Only used when type: LoadBalancer
+	//+kubebuilder:default=""
+	LoadBalancerIP string `json:"loadBalancerIP,omitempty"`
+	// Source ip ranges for the catalog services. Only used when type: LoadBalancer
+	LoadBalancerSourceRanges []string `json:"loadBalancerSourceRanges,omitempty"`
+	// catalog service node port Only used when type: NodePort
+	NodePort map[string]string `json:"nodePort,omitempty"`
+	// catalog service session affinity
+	SessionAffinity string `json:"sessionAffinity,omitempty"`
+	// catalog service session affinity config
+	SessionAffinityConfig string `json:"sessionAffinityConfig,omitempty"`
+	// catalog service type
+	//+kubebuilder:default="ClusterIP"
+	Type string `json:"type,omitempty"`
+}
+
 type LakekeeperCatalog struct {
 	Image LakekeeperImage `json:"image"`
 	// Number of replicas to deploy. Replicas are stateless.
 	//+kubebuilder:default=1
-	Replicas int32 `json:"replicas"`
+	Replicas int32             `json:"replicas"`
+	Service  LakekeeperService `json:"service"`
 }
 
 type LakekeeperExternalDB struct {
 	//+kubebuilder:default="catalog"
 	Database string `json:"database"`
+	// hostname to use for read instances of the external database
 	//+kubebuilder:default="localhost"
 	HostRead string `json:"host_read"`
+	// hostname to use for write instances of the external database. For single read/write instances, this should be the same as host_read
 	//+kubebuilder:default="localhost"
 	HostWrite string `json:"host_write"`
 	//+kubebuilder:default=""
@@ -75,6 +101,7 @@ type LakekeeperExternalDB struct {
 	PasswordSecretKey string `json:"passwordSecretKey"`
 	//+kubebuilder:default=5432
 	Port int32 `json:"port"`
+	// the type of external database. allowed values: "postgres"
 	//+kubebuilder:default="postgres"
 	Type string `json:"type"`
 	//+kubebuilder:default="catalog"
