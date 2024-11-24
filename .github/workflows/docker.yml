@@ -1,6 +1,8 @@
 name: Docker Publish CI
 
 on:
+  pull_request:
+    branches: [ "main" ]
   push:
     branches: [ "main" ]
 
@@ -18,9 +20,9 @@ jobs:
     - name: Login to GitHub Container Registry
       uses: docker/login-action@v3
       with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        registry: quay.io
+        username: ${{ secrets.QUAY_LAKEKEEPER_OPERATOR_USER }}
+        password: ${{ secrets.QUAY_LAKEKEEPER_OPERATOR_PASSWORD }}
 
     - name: build-and-push
       run: make docker-buildx
