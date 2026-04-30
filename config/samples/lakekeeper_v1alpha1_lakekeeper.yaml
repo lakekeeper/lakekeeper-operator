@@ -1,0 +1,139 @@
+apiVersion: lakekeeper.k8s.lakekeeper.io/v1alpha1
+kind: Lakekeeper
+metadata:
+  labels:
+    app.kubernetes.io/name: lakekeeper-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: lakekeeper-sample
+  namespace: default
+spec:
+  # Container image
+  image: quay.io/lakekeeper/catalog:latest
+  
+  # Number of replicas
+  replicas: 2
+  
+  # Resource requirements
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  
+  # Database configuration
+  database:
+    type: postgres
+    postgres:
+      host: postgres.default.svc
+      port: 5432
+      database: lakekeeper
+      user: lakekeeper
+      passwordSecretRef:
+        name: postgres-credentials
+        key: password
+      encryptionKeySecretRef:
+        name: postgres-credentials
+        key: encryption-key
+      sslMode: require
+      maxConnections: 20
+      minIdleConnections: 5
+      connectionTimeout: "30s"
+  
+  # Server configuration
+  server:
+    baseURI: "https://lakekeeper.example.com"
+    listenPort: 8181
+    metricsPort: 9000
+    enableDefaultProject: true
+    
+    pagination:
+      defaultSize: 25
+      maxSize: 500
+    
+    cors:
+      allowOrigins:
+        - "https://app.example.com"
+      allowHeaders:
+        - "Content-Type"
+        - "Authorization"
+      allowMethods:
+        - "GET"
+        - "POST"
+        - "PUT"
+        - "DELETE"
+    
+    reservedNamespaces:
+      - "system"
+      - "admin"
+    
+    storageSystemCredentials:
+      enableAWS: true
+      aws:
+        assumeRoleRequireExternalID: true
+        allowDirectSystemCredentials: true
+      
+      enableAzure: true
+      azure:
+        allowManagedIdentity: true
+        allowWorkloadIdentity: true
+      
+      enableGCP: true
+      gcp:
+        allowWorkloadIdentity: true
+        allowServiceAccountKey: false
+  
+  # Secret store configuration (optional - defaults to postgres)
+  secretStore:
+    type: postgres  # Use database encryption (default)
+  
+  # Authentication configuration
+  authentication:
+    openID:
+      providerURI: "https://auth.example.com"
+      audience: "lakekeeper"
+      subjectClaim: "sub"
+      rolesClaim: "roles"
+      scopes:
+        - "openid"
+        - "profile"
+        - "email"
+    
+    kubernetes:
+      enabled: true
+      audiences:
+        - "lakekeeper"
+      acceptLegacyTokens: false
+  
+  # Authorization configuration
+  authorization:
+    backend: openfga
+    openFGA:
+      endpoint: "http://openfga.default.svc:8080"
+      storeName: "lakekeeper"
+      authorizationModelVersion: "01HQJR9HTJMQPVRD8Y8R5X92E3"
+  
+  # Idempotency configuration (optional)
+  idempotency:
+    enabled: true
+    lifetime: "PT30M"
+    gracePeriod: "PT5M"
+    cleanupTimeout: "PT1H"
+  
+  # Task queues configuration (optional)
+  taskQueues:
+    pollInterval: "5s"
+    tabularExpirationWorkers: 5
+    tabularPurgeWorkers: 3
+  
+  # Request limits (optional)
+  requestLimits:
+    maxRequestBodySize: "10MB"
+    maxRequestTime: "30s"
+  
+  # SSL configuration (optional)
+  ssl:
+    certFileSecretRef:
+      name: tls-cert
+      key: tls.crt

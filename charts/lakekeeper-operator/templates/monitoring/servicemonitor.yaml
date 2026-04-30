@@ -1,0 +1,46 @@
+{{- if .Values.prometheus.enable }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: {{ include "lakekeeper-operator.name" . }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    control-plane: controller-manager
+  name: {{ include "lakekeeper-operator.resourceName" (dict "suffix" "controller-manager-metrics-monitor" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpoints:
+    - path: /metrics
+      port: https
+      scheme: https
+      authorization:
+        credentials:
+          name: {{ include "lakekeeper-operator.resourceName" (dict "suffix" "controller-manager-token" "context" $) }}
+          key: token
+      tlsConfig:
+        {{- if .Values.certManager.enable }}
+        serverName: {{ include "lakekeeper-operator.resourceName" (dict "suffix" "controller-manager-metrics-service" "context" $) }}.{{ .Release.Namespace }}.svc
+        # Apply secure TLS configuration with cert-manager
+        insecureSkipVerify: false
+        ca:
+          secret:
+            name: {{ include "lakekeeper-operator.resourceName" (dict "suffix" "metrics-server-cert" "context" $) }}
+            key: ca.crt
+        cert:
+          secret:
+            name: {{ include "lakekeeper-operator.resourceName" (dict "suffix" "metrics-server-cert" "context" $) }}
+            key: tls.crt
+        keySecret:
+          name: {{ include "lakekeeper-operator.resourceName" (dict "suffix" "metrics-server-cert" "context" $) }}
+          key: tls.key
+        {{- else }}
+        # Development/Test mode (insecure configuration)
+        insecureSkipVerify: true
+        {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "lakekeeper-operator.name" . }}
+      control-plane: controller-manager
+{{- end }}

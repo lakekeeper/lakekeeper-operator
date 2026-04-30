@@ -1,0 +1,969 @@
+{{- if .Values.crd.enable }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    {{- if .Values.crd.keep }}
+    "helm.sh/resource-policy": keep
+    {{- end }}
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: lakekeepers.lakekeeper.k8s.lakekeeper.io
+spec:
+  group: lakekeeper.k8s.lakekeeper.io
+  names:
+    kind: Lakekeeper
+    listKind: LakekeeperList
+    plural: lakekeepers
+    shortNames:
+    - lk
+    singular: lakekeeper
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Lakekeeper container image
+      jsonPath: .spec.image
+      name: Image
+      type: string
+    - description: Desired replicas
+      jsonPath: .spec.replicas
+      name: Replicas
+      type: integer
+    - description: Ready replicas
+      jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - description: Bootstrap timestamp
+      jsonPath: .status.bootstrappedAt
+      name: Bootstrapped
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Lakekeeper is the Schema for the lakekeepers API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: LakekeeperSpec defines the desired state of Lakekeeper.
+            properties:
+              authentication:
+                description: |-
+                  Authentication configures identity verification methods.
+                  At least one authentication method is required unless using allowall authorization.
+                properties:
+                  kubernetes:
+                    description: Kubernetes configures Kubernetes ServiceAccount token
+                      authentication.
+                    properties:
+                      acceptLegacyTokens:
+                        default: false
+                        description: |-
+                          AcceptLegacyTokens allows authentication with legacy (non-bound) tokens.
+                          Should be false in production for security.
+                        type: boolean
+                      audiences:
+                        description: Audiences is a list of acceptable token audiences.
+                        items:
+                          type: string
+                        type: array
+                      enabled:
+                        default: false
+                        description: Enabled enables Kubernetes ServiceAccount token
+                          authentication.
+                        type: boolean
+                    required:
+                    - enabled
+                    type: object
+                  openID:
+                    description: OpenID configures OpenID Connect authentication.
+                    properties:
+                      audience:
+                        description: Audience is the expected audience claim in JWT
+                          tokens.
+                        minLength: 1
+                        type: string
+                      providerURI:
+                        description: |-
+                          ProviderURI is the OpenID Connect provider's issuer URL.
+                          Must use HTTPS for security (HTTP is not supported).
+                          Example: https://login.microsoftonline.com/<tenant-id>/v2.0
+                        pattern: ^https://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$
+                        type: string
+                      rolesClaim:
+                        default: roles
+                        description: RolesClaim specifies the JWT claim containing
+                          user roles.
+                        type: string
+                      scopes:
+                        description: Scopes is a list of OAuth scopes to request.
+                        items:
+                          type: string
+                        type: array
+                      subjectClaim:
+                        default: sub
+                        description: SubjectClaim specifies the JWT claim to use as
+                          the user identifier.
+                        type: string
+                    required:
+                    - audience
+                    - providerURI
+                    type: object
+                type: object
+              authorization:
+                description: Authorization configures access control.
+                properties:
+                  backend:
+                    allOf:
+                    - enum:
+                      - allowall
+                      - openfga
+                      - cedar
+                    - enum:
+                      - allowall
+                      - openfga
+                      - cedar
+                    description: Backend specifies the authorization backend.
+                    type: string
+                  cedar:
+                    description: |-
+                      Cedar contains Cedar authorization configuration.
+                      Required when backend is cedar (LAKEKEEPER+ only).
+                    properties:
+                      entitySource:
+                        description: EntitySource specifies where Cedar entities are
+                          loaded from.
+                        minLength: 1
+                        type: string
+                      policySource:
+                        description: PolicySource specifies where Cedar policies are
+                          loaded from.
+                        minLength: 1
+                        type: string
+                      userDerivations:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          UserDerivations configures how user entities are derived from authentication.
+                          LAKEKEEPER+ only.
+                        type: object
+                    required:
+                    - entitySource
+                    - policySource
+                    type: object
+                  openFGA:
+                    description: |-
+                      OpenFGA contains OpenFGA authorization configuration.
+                      Required when backend is openfga.
+                    properties:
+                      authorizationModelVersion:
+                        description: AuthorizationModelVersion specifies the OpenFGA
+                          model version to use.
+                        type: string
+                      clientID:
+                        description: ClientID is the OAuth client ID for OpenFGA authentication.
+                        type: string
+                      clientSecretRef:
+                        description: ClientSecretRef references a secret containing
+                          the OAuth client secret.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      endpoint:
+                        description: Endpoint is the OpenFGA API endpoint.
+                        pattern: ^https?://[a-zA-Z0-9.-]+(:[0-9]+)?$
+                        type: string
+                      storeName:
+                        description: StoreName is the OpenFGA store name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - endpoint
+                    - storeName
+                    type: object
+                required:
+                - backend
+                type: object
+                x-kubernetes-validations:
+                - message: openFGA configuration is required when backend is openfga
+                  rule: 'self.backend == ''openfga'' ? has(self.openFGA) : true'
+                - message: cedar configuration is required when backend is cedar
+                  rule: 'self.backend == ''cedar'' ? has(self.cedar) : true'
+              bootstrap:
+                description: Bootstrap configures automatic server initialization.
+                properties:
+                  checkInterval:
+                    default: 15s
+                    description: |-
+                      CheckInterval controls how often the operator polls /management/v1/info to detect
+                      bootstrap state. This applies regardless of whether the operator performs the
+                      bootstrap itself (spec.bootstrap.enabled=true) or merely observes it (e.g. allowall
+                      mode or manual bootstrap). Polling stops permanently once bootstrap is confirmed
+                      (BootstrappedAt is set).
+                      Must be a valid Go duration string (e.g. "15s", "1m", "2m30s").
+                    pattern: ^\d+(\.\d+)?(ns|us|µs|ms|s|m|h)(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))*$
+                    type: string
+                  enabled:
+                    description: |-
+                      Enabled controls whether the operator automatically bootstraps the Lakekeeper
+                      server when it first becomes ready. Defaults to false (nil is treated as false).
+                      When true, the operator will POST to /management/v1/bootstrap after the
+                      deployment is ready, setting the initial administrator.
+                    type: boolean
+                type: object
+              database:
+                description: Database configures the database backend for Lakekeeper.
+                properties:
+                  postgres:
+                    description: |-
+                      Postgres contains PostgreSQL-specific configuration.
+                      Required when type is postgres.
+                    properties:
+                      connectionTimeout:
+                        description: ConnectionTimeout is the database connection
+                          timeout (e.g., "30s", "1m").
+                        pattern: ^\d+[smh]$
+                        type: string
+                      database:
+                        description: Database is the PostgreSQL database name.
+                        minLength: 1
+                        type: string
+                      encryptionKeySecretRef:
+                        description: |-
+                          EncryptionKeySecretRef references a secret containing the database encryption key.
+                          This is required for encrypting sensitive data at rest in PostgreSQL.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      host:
+                        description: Host is the PostgreSQL server hostname or IP.
+                        minLength: 1
+                        type: string
+                      maxConnections:
+                        description: MaxConnections is the maximum number of database
+                          connections in the pool.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      minIdleConnections:
+                        description: MinIdleConnections is the minimum number of idle
+                          connections to maintain.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      passwordSecretRef:
+                        description: PasswordSecretRef references a secret containing
+                          the PostgreSQL password.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      port:
+                        default: 5432
+                        description: Port is the PostgreSQL server port.
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                      readHost:
+                        description: ReadHost is the PostgreSQL read replica hostname
+                          (optional).
+                        type: string
+                      sslMode:
+                        default: require
+                        description: |-
+                          SSLMode specifies the PostgreSQL SSL connection mode.
+                          Defaults to "require" (TLS enforced, no certificate verification).
+                          Use "verify-ca" or "verify-full" for stricter certificate validation.
+                          Only set to "prefer", "allow", or "disable" in development environments without TLS.
+                        enum:
+                        - disable
+                        - allow
+                        - prefer
+                        - require
+                        - verify-ca
+                        - verify-full
+                        type: string
+                      sslRootCertSecretRef:
+                        description: SSLRootCertSecretRef references a secret containing
+                          the SSL root certificate.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      user:
+                        description: |-
+                          User is the PostgreSQL username as a plain string.
+                          Note: This value is stored unencrypted in etcd. For sensitive usernames,
+                          use userSecretRef instead. Exactly one of user or userSecretRef must be specified.
+                        type: string
+                      userSecretRef:
+                        description: |-
+                          UserSecretRef references a secret containing the PostgreSQL username.
+                          Use this for sensitive usernames that should not be stored in plain text.
+                          Exactly one of user or userSecretRef must be specified.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                    required:
+                    - database
+                    - encryptionKeySecretRef
+                    - host
+                    - passwordSecretRef
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of user or userSecretRef must be specified
+                      rule: (has(self.user) && !has(self.userSecretRef)) || (!has(self.user)
+                        && has(self.userSecretRef))
+                  type:
+                    description: |-
+                      Type specifies the database backend type.
+                      Currently only postgres is supported.
+                    enum:
+                    - postgres
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: postgres configuration is required when type is postgres
+                  rule: 'self.type == ''postgres'' ? has(self.postgres) : true'
+              idempotency:
+                description: Idempotency configures request idempotency handling.
+                properties:
+                  cleanupTimeout:
+                    description: CleanupTimeout is how long to wait before cleaning
+                      up expired keys (ISO-8601 format).
+                    pattern: ^P(?:\d+Y)?(?:\d+M)?(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?$
+                    type: string
+                  enabled:
+                    default: true
+                    description: Enabled enables idempotency key tracking.
+                    type: boolean
+                  gracePeriod:
+                    description: GracePeriod is the window after lifetime for accepting
+                      retries (ISO-8601 format).
+                    pattern: ^P(?:\d+Y)?(?:\d+M)?(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?$
+                    type: string
+                  lifetime:
+                    default: PT30M
+                    description: |-
+                      Lifetime is the duration an idempotency key remains valid (ISO-8601 format).
+                      Examples: "PT30M" (30 minutes), "PT1H" (1 hour), "P1D" (1 day).
+                    pattern: ^P(?:\d+Y)?(?:\d+M)?(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?$
+                    type: string
+                type: object
+              image:
+                description: Image specifies the Lakekeeper container image.
+                minLength: 1
+                type: string
+              replicas:
+                default: 1
+                description: Replicas is the number of Lakekeeper pods to run.
+                format: int32
+                minimum: 0
+                type: integer
+              requestLimits:
+                description: RequestLimits configures HTTP request size and timeout
+                  limits.
+                properties:
+                  maxRequestBodySize:
+                    description: MaxRequestBodySize is the maximum request body size
+                      (e.g., "10MB", "1GB").
+                    pattern: ^\d+[KMGT]?B$
+                    type: string
+                  maxRequestTime:
+                    description: MaxRequestTime is the maximum time to process a request
+                      (e.g., "30s", "5m").
+                    pattern: ^\d+[smh]$
+                    type: string
+                type: object
+              resources:
+                description: Resources defines CPU/memory resource requirements for
+                  Lakekeeper pods.
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims,
+                      that are used by this container.
+
+                      This is an alpha field and requires enabling the
+                      DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: |-
+                            Name must match the name of one entry in pod.spec.resourceClaims of
+                            the Pod where this field is used. It makes that resource available
+                            inside a container.
+                          type: string
+                        request:
+                          description: |-
+                            Request is the name chosen for a request in the referenced claim.
+                            If empty, everything from the claim is made available, otherwise
+                            only the result of this request.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Limits describes the maximum amount of compute resources allowed.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Requests describes the minimum amount of compute resources required.
+                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                type: object
+              secretStore:
+                description: |-
+                  SecretStore configures where Lakekeeper stores sensitive credentials.
+                  Defaults to postgres (database encryption) if not specified.
+                properties:
+                  type:
+                    allOf:
+                    - enum:
+                      - postgres
+                      - vault-kv2
+                    - enum:
+                      - postgres
+                      - vault-kv2
+                    default: postgres
+                    description: |-
+                      Type specifies the secret store backend.
+                      Defaults to postgres if not specified.
+                    type: string
+                  vaultKV2:
+                    description: |-
+                      VaultKV2 contains HashiCorp Vault KV2 configuration.
+                      Required when type is vault-kv2.
+                    properties:
+                      passwordSecretRef:
+                        description: PasswordSecretRef references a secret containing
+                          the Vault password.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      secretMount:
+                        description: SecretMount is the Vault KV2 mount path.
+                        minLength: 1
+                        type: string
+                      url:
+                        description: URL is the Vault server address.
+                        pattern: ^https?://[a-zA-Z0-9.-]+(:[0-9]+)?$
+                        type: string
+                      user:
+                        description: |-
+                          User is the Vault username as a plain string.
+                          Note: This value is stored unencrypted in etcd. For sensitive usernames,
+                          use userSecretRef instead. Exactly one of user or userSecretRef must be specified.
+                        type: string
+                      userSecretRef:
+                        description: |-
+                          UserSecretRef references a secret containing the Vault username.
+                          Use this for sensitive usernames that should not be stored in plain text.
+                          Exactly one of user or userSecretRef must be specified.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                    required:
+                    - passwordSecretRef
+                    - secretMount
+                    - url
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of user or userSecretRef must be specified
+                      rule: (has(self.user) && !has(self.userSecretRef)) || (!has(self.user)
+                        && has(self.userSecretRef))
+                type: object
+                x-kubernetes-validations:
+                - message: vaultKV2 configuration is required when type is vault-kv2
+                  rule: 'self.type == ''vault-kv2'' ? has(self.vaultKV2) : true'
+              server:
+                description: Server configures the Lakekeeper server behavior.
+                properties:
+                  baseURI:
+                    description: |-
+                      BaseURI is the base URL where Lakekeeper is accessible.
+                      Used for generating OAuth redirects and links.
+                    pattern: ^https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$
+                    type: string
+                  cors:
+                    description: CORS configures Cross-Origin Resource Sharing.
+                    properties:
+                      allowHeaders:
+                        description: AllowHeaders is a list of allowed request headers.
+                        items:
+                          type: string
+                        type: array
+                      allowMethods:
+                        description: AllowMethods is a list of allowed HTTP methods.
+                        items:
+                          type: string
+                        type: array
+                      allowOrigins:
+                        description: |-
+                          AllowOrigins is a list of allowed origin domains.
+                          Use ["*"] to allow all origins (not recommended for production).
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  enableDefaultProject:
+                    default: true
+                    description: EnableDefaultProject creates a default project on
+                      first startup.
+                    type: boolean
+                  listenPort:
+                    default: 8181
+                    description: ListenPort is the port for the main REST API (catalog
+                      + management).
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  metricsPort:
+                    default: 9000
+                    description: MetricsPort is the port for Prometheus metrics.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  pagination:
+                    description: Pagination configures default pagination behavior.
+                    properties:
+                      defaultSize:
+                        default: 25
+                        description: DefaultSize is the default page size when not
+                          specified.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxSize:
+                        default: 500
+                        description: MaxSize is the maximum allowed page size.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                  reservedNamespaces:
+                    description: ReservedNamespaces is a list of namespace names that
+                      cannot be created by users.
+                    items:
+                      type: string
+                    type: array
+                  storageSystemCredentials:
+                    description: StorageSystemCredentials configures cloud provider
+                      credential handling.
+                    properties:
+                      aws:
+                        description: |-
+                          AWS contains AWS-specific credential configuration.
+                          Only used if enableAWS is true.
+                        properties:
+                          allowDirectSystemCredentials:
+                            default: true
+                            description: AllowDirectSystemCredentials allows using
+                              IAM instance profile or environment credentials.
+                            type: boolean
+                          assumeRoleRequireExternalID:
+                            default: false
+                            description: |-
+                              AssumeRoleRequireExternalID requires external ID for IAM role assumption.
+                              Enhances security by preventing the confused deputy problem.
+                            type: boolean
+                        type: object
+                      azure:
+                        description: |-
+                          Azure contains Azure-specific credential configuration.
+                          Only used if enableAzure is true.
+                        properties:
+                          allowManagedIdentity:
+                            default: true
+                            description: AllowManagedIdentity allows using Azure Managed
+                              Identity for authentication.
+                            type: boolean
+                          allowWorkloadIdentity:
+                            default: true
+                            description: AllowWorkloadIdentity allows using Azure
+                              Workload Identity (federated identity).
+                            type: boolean
+                        type: object
+                      enableAWS:
+                        description: EnableAWS enables AWS credential handling.
+                        type: boolean
+                      enableAzure:
+                        description: EnableAzure enables Azure credential handling.
+                        type: boolean
+                      enableGCP:
+                        description: EnableGCP enables GCP credential handling.
+                        type: boolean
+                      gcp:
+                        description: |-
+                          GCP contains GCP-specific credential configuration.
+                          Only used if enableGCP is true.
+                        properties:
+                          allowServiceAccountKey:
+                            default: false
+                            description: AllowServiceAccountKey allows using service
+                              account key files for authentication.
+                            type: boolean
+                          allowWorkloadIdentity:
+                            default: true
+                            description: AllowWorkloadIdentity allows using GCP Workload
+                              Identity for authentication.
+                            type: boolean
+                        type: object
+                    type: object
+                type: object
+              ssl:
+                description: SSL configures TLS/SSL certificates for the server.
+                properties:
+                  certDirConfigMapRef:
+                    description: CertDirConfigMapRef references a ConfigMap containing
+                      a directory of certificates.
+                    properties:
+                      key:
+                        description: The key to select.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the ConfigMap or its key must
+                          be defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  certFileSecretRef:
+                    description: CertFileSecretRef references a secret containing
+                      the TLS certificate file.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
+              taskQueues:
+                description: TaskQueues configures background task processing.
+                properties:
+                  expireSnapshotsWorkers:
+                    description: ExpireSnapshotsWorkers is the number of workers for
+                      snapshot expiration (LAKEKEEPER+ only).
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  pollInterval:
+                    description: PollInterval is how often to poll for tasks (e.g.,
+                      "5s", "500ms").
+                    pattern: ^\d+(ms|s)$
+                    type: string
+                  tabularExpirationWorkers:
+                    description: TabularExpirationWorkers is the number of workers
+                      for table expiration tasks.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  tabularPurgeWorkers:
+                    description: TabularPurgeWorkers is the number of workers for
+                      table purge tasks.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
+            required:
+            - authorization
+            - database
+            - image
+            type: object
+          status:
+            description: LakekeeperStatus defines the observed state of Lakekeeper.
+            properties:
+              bootstrappedAt:
+                description: BootstrappedAt is the time when the Lakekeeper server
+                  was successfully bootstrapped.
+                format: date-time
+                type: string
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the Lakekeeper's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              migrationJob:
+                description: |-
+                  MigrationJob is the name of the current migration Job.
+                  Tracks which migration Job corresponds to the current spec.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration reflects the generation most recently
+                  observed by the controller.
+                format: int64
+                type: integer
+              readyReplicas:
+                description: ReadyReplicas is the number of ready pods.
+                format: int32
+                type: integer
+              replicas:
+                description: Replicas is the actual number of pods.
+                format: int32
+                type: integer
+              serverID:
+                description: ServerID is the Lakekeeper server's unique UUID, set
+                  after a successful bootstrap.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}

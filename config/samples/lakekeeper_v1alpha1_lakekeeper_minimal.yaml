@@ -1,0 +1,26 @@
+apiVersion: lakekeeper.k8s.lakekeeper.io/v1alpha1
+kind: Lakekeeper
+metadata:
+  name: lakekeeper-minimal
+  namespace: default
+spec:
+  # Required: Container image
+  image: quay.io/lakekeeper/catalog:latest
+  
+  # Required: Database configuration
+  database:
+    type: postgres
+    postgres:
+      host: postgres.default.svc
+      database: lakekeeper
+      user: lakekeeper
+      passwordSecretRef:
+        name: postgres-credentials
+        key: password
+      encryptionKeySecretRef:
+        name: postgres-credentials
+        key: encryption-key
+  
+  # Required: Authorization configuration
+  authorization:
+    backend: allowall  # Development only - use openfga or cedar in production

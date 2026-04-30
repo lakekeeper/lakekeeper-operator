@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- lakekeeper_v1alpha1_lakekeeper.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
