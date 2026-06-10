@@ -30,3 +30,9 @@ go.work
 *.swp
 *.swo
 *~
+
+# Claude Code — ignore personal/local files; team-shared files stay committed
+# (committed: .claude/settings.json, .claude/CLAUDE.md, .claude/agents/, .claude/rules/)
+.claude/*.local.*
+.claude/worktrees/
+CLAUDE.local.md
