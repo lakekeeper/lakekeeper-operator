@@ -112,6 +112,10 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -count=1 $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
+.PHONY: test-focus
+test-focus: setup-envtest ## Fast inner-loop run of a Ginkgo focus (skips codegen). Usage: make test-focus FOCUS='deploymentRolloutComplete'
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -count=1 ./internal/controller/... -args -ginkgo.focus='$(FOCUS)'
+
 # TODO(user): To use a different vendor for e2e tests, the tests are now cluster-agnostic!
 # E2E tests work with ANY Kubernetes cluster (kind, k3d, minikube, cloud).
 # The default Makefile target uses Kind for consistency, but tests themselves detect
