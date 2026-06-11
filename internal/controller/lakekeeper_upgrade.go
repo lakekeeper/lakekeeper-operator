@@ -94,7 +94,9 @@ func (r *LakekeeperReconciler) enterUpgradeIfNeeded(ctx context.Context, lk *lak
 
 	liveImage, exists, err := r.liveDeploymentImage(ctx, lk)
 	if err != nil {
-		return ctrl.Result{}, false, err
+		// Transient read error: own the cycle (done=true) so controller-runtime
+		// requeues with backoff. Returning done=false would drop the error.
+		return ctrl.Result{}, true, err
 	}
 
 	if !quiesceRequired(needsMig, exists, liveImage, lk.Spec.Image, r.desiredReplicas(lk), r.upgradeStrategy(lk)) {
@@ -153,7 +155,7 @@ func (r *LakekeeperReconciler) reconcileQuiescing(ctx context.Context, lk *lakek
 		return ctrl.Result{}, true, err
 	}
 
-	complete, err := r.rolloutComplete(ctx, lk)
+	complete, err := r.rolloutComplete(ctx, lk, liveImage)
 	if err != nil {
 		return ctrl.Result{}, true, err
 	}
@@ -175,17 +177,11 @@ func (r *LakekeeperReconciler) reconcileMigratingPhase(ctx context.Context, lk *
 		return result, true, err
 	}
 	if done {
-		// reconcileMigration returns done=true either while the Job is in progress
-		// (RequeueAfter set) or on permanent failure (no requeue). On permanent
-		// failure, add read-only-recovery context to the Degraded condition.
-		if result.RequeueAfter == 0 {
-			r.setCondition(lk, TypeDegraded, metav1.ConditionTrue, "MigrationFailed",
-				"Database migration failed; the cluster remains in read-only maintenance mode. "+
-					"Fix the underlying cause or re-apply spec.image to retry.")
-			if statusErr := r.Status().Update(ctx, lk); statusErr != nil {
-				return ctrl.Result{}, true, statusErr
-			}
-		}
+		// reconcileMigration owns the status write for both the in-progress and the
+		// permanent-failure cases. On permanent failure it already emits the
+		// read-only-recovery Degraded message (degradedMigrationMessage keys off the
+		// Migrating phase), so there is no second write to make here — the old pods
+		// stay safely read-only until the spec.image re-edit resets the machine.
 		return result, true, nil
 	}
 
@@ -207,7 +203,7 @@ func (r *LakekeeperReconciler) reconcileRollingOut(ctx context.Context, lk *lake
 		return ctrl.Result{}, true, err
 	}
 
-	complete, err := r.rolloutComplete(ctx, lk)
+	complete, err := r.rolloutComplete(ctx, lk, lk.Spec.Image)
 	if err != nil {
 		return ctrl.Result{}, true, err
 	}
@@ -246,14 +242,17 @@ func (r *LakekeeperReconciler) advanceTo(
 }
 
 // rolloutComplete fetches the live Deployment and reports whether its rollout has
-// fully settled. A fresh Get is required because CreateOrUpdate returns an object
-// with stale .Status.
-func (r *LakekeeperReconciler) rolloutComplete(ctx context.Context, lk *lakekeeperv1alpha1.Lakekeeper) (bool, error) {
+// fully settled on wantImage. A fresh Get is required because CreateOrUpdate returns
+// an object with stale .Status. The image check ensures a phase only advances once
+// the cluster actually runs the image that phase intends — guarding against a
+// Deployment that was deleted/recreated or externally patched between our write and
+// this read.
+func (r *LakekeeperReconciler) rolloutComplete(ctx context.Context, lk *lakekeeperv1alpha1.Lakekeeper, wantImage string) (bool, error) {
 	dep := &appsv1.Deployment{}
 	if err := r.Get(ctx, client.ObjectKey{Name: lk.Name, Namespace: lk.Namespace}, dep); err != nil {
 		return false, fmt.Errorf("failed to get deployment for rollout check: %w", err)
 	}
-	return deploymentRolloutComplete(dep), nil
+	return deploymentSettledOn(dep, wantImage), nil
 }
 
 // liveDeploymentImage reads the lakekeeper container image from the live Deployment.
@@ -267,13 +266,20 @@ func (r *LakekeeperReconciler) liveDeploymentImage(ctx context.Context, lk *lake
 	if err != nil {
 		return "", false, fmt.Errorf("failed to get deployment: %w", err)
 	}
+	// Deployment exists; report its image (empty if it has no lakekeeper container).
+	image, _ := lakekeeperContainerImage(dep)
+	return image, true, nil
+}
+
+// lakekeeperContainerImage returns the image of the "lakekeeper" container in dep.
+// The second return value is false when no such container is present.
+func lakekeeperContainerImage(dep *appsv1.Deployment) (string, bool) {
 	for i := range dep.Spec.Template.Spec.Containers {
 		if dep.Spec.Template.Spec.Containers[i].Name == "lakekeeper" {
-			return dep.Spec.Template.Spec.Containers[i].Image, true, nil
+			return dep.Spec.Template.Spec.Containers[i].Image, true
 		}
 	}
-	// Deployment exists but has no recognizable lakekeeper container.
-	return "", true, nil
+	return "", false
 }
 
 // desiredReplicas returns the spec replica count, defaulting to 1 when unset.
@@ -359,6 +365,21 @@ func (r *LakekeeperReconciler) buildDeploymentEnvVars(lk *lakekeeperv1alpha1.Lak
 	return envVars
 }
 
+// degradedMigrationMessage returns the Degraded-condition message for a permanent
+// migration failure. During the Migrating phase of a read-only-gated upgrade it adds
+// recovery guidance (the old pods stay safely read-only, so no old binary writes a
+// migrating schema); otherwise it is the plain permanent-failure message.
+//
+// Centralizing it here lets reconcileMigration emit the correct message in a single
+// status write, so the upgrade path does not have to follow up with a second write.
+func degradedMigrationMessage(lk *lakekeeperv1alpha1.Lakekeeper) string {
+	if lk.Status.UpgradePhase == lakekeeperv1alpha1.UpgradePhaseMigrating {
+		return "Database migration failed; the cluster remains in read-only maintenance mode. " +
+			"Fix the underlying cause or re-apply spec.image to retry."
+	}
+	return "Database migration failed permanently"
+}
+
 // quiesceRequired reports whether a read-only-gated quiesce step should run before
 // migrating. It is true only when a migration is needed for a Deployment that
 // already exists on a different image, replicas are scaled above zero, and the
@@ -416,6 +437,15 @@ func parseVersion(v string) ([3]int, bool) {
 		out[i] = n
 	}
 	return out, true
+}
+
+// deploymentSettledOn reports whether dep has fully rolled out (see
+// deploymentRolloutComplete) AND its lakekeeper container runs wantImage. The image
+// check guards an upgrade-phase transition against a Deployment that was deleted and
+// recreated, or externally patched, to an image other than the one the phase intends.
+func deploymentSettledOn(dep *appsv1.Deployment, wantImage string) bool {
+	image, ok := lakekeeperContainerImage(dep)
+	return ok && image == wantImage && deploymentRolloutComplete(dep)
 }
 
 // deploymentRolloutComplete reports whether a Deployment's rollout has fully

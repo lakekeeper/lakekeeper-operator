@@ -264,7 +264,7 @@ func (r *LakekeeperReconciler) reconcileMigration(ctx context.Context, lk *lakek
 		// Do not requeue automatically; user must change spec to recover.
 		logger.Error(err, "Migration failed permanently")
 		r.setCondition(lk, TypeMigrated, metav1.ConditionFalse, "MigrationFailed", err.Error())
-		r.setCondition(lk, TypeDegraded, metav1.ConditionTrue, "MigrationFailed", "Database migration failed permanently")
+		r.setCondition(lk, TypeDegraded, metav1.ConditionTrue, "MigrationFailed", degradedMigrationMessage(lk))
 		r.setCondition(lk, TypeReady, metav1.ConditionFalse, "MigrationFailed", "Database migration failed")
 		if statusErr := r.Status().Update(ctx, lk); statusErr != nil {
 			logger.Error(statusErr, "Failed to update status after permanent migration failure")
@@ -303,7 +303,7 @@ func (r *LakekeeperReconciler) reconcileMigration(ctx context.Context, lk *lakek
 			logger.Info("Migration Job permanently failed, halting requeue until spec changes", "jobName", job.Name)
 			r.setCondition(lk, TypeMigrated, metav1.ConditionFalse, "MigrationFailed", fmt.Sprintf("Migration Job %s failed", job.Name))
 			r.setCondition(lk, TypeReady, metav1.ConditionFalse, "MigrationFailed", "Database migration failed")
-			r.setCondition(lk, TypeDegraded, metav1.ConditionTrue, "MigrationFailed", "Migration Job failed after maximum retries")
+			r.setCondition(lk, TypeDegraded, metav1.ConditionTrue, "MigrationFailed", degradedMigrationMessage(lk))
 			lk.Status.MigrationJob = job.Name
 			if err := r.Status().Update(ctx, lk); err != nil {
 				logger.Error(err, "Failed to update status after migration failure")

@@ -213,11 +213,25 @@ var _ = Describe("Lakekeeper upgrade choreography (integration)", func() {
 	// driveUpgradeToCompletion reconciles repeatedly, nudging the simulated cluster
 	// (completing in-progress migrate Jobs and marking rollouts done) until the
 	// upgrade converges to targetImage with the phase cleared.
+	//
+	// Because it force-completes whatever rollout it sees each iteration, it would
+	// otherwise mask a sequencing regression that rolls the new image forward without
+	// migrating. The invariant below closes that gap universally: reaching RollingOut
+	// requires a succeeded migrate Job for the target spec. (Specs that need the
+	// stricter "old image stays put until migration" guarantee — e.g. the drift specs
+	// — assert it explicitly; the rollback path never enters RollingOut, so the
+	// invariant is vacuously satisfied there.)
 	driveUpgradeToCompletion := func(name, targetImage string) {
 		Eventually(func(g Gomega) {
 			_, err := reconcileOnce(name)
 			g.Expect(err).NotTo(HaveOccurred())
 			lk := getLK(name)
+			if lk.Status.UpgradePhase == lakekeeperv1alpha1.UpgradePhaseRollingOut {
+				job, ok := migrationJobExists(lk)
+				g.Expect(ok).To(BeTrue(), "a migrate Job for the target spec must exist before RollingOut")
+				g.Expect(isJobSuccessful(job)).To(BeTrue(),
+					"RollingOut must not begin before the target migration has succeeded")
+			}
 			if job, ok := migrationJobExists(lk); ok && job.Status.Succeeded == 0 && job.Status.Failed == 0 {
 				_ = completeMigrationJob(ctx, lk, timeout)
 			}
@@ -405,13 +419,19 @@ var _ = Describe("Lakekeeper upgrade choreography (integration)", func() {
 			}, timeout, interval).Should(Succeed())
 			Expect(simulateMigrationJobFailure(ctx, getLK(name), migrationJobBackoffLimit, timeout)).To(Succeed())
 
-			By("staying in Migrating, Degraded=True, with old image + read-only flag intact")
+			By("staying in Migrating, Degraded=True with read-only-recovery guidance, old image + flag intact")
 			Eventually(func(g Gomega) {
 				_, err := reconcileOnce(name)
 				g.Expect(err).NotTo(HaveOccurred())
 				lk := getLK(name)
 				g.Expect(lk.Status.UpgradePhase).To(Equal(lakekeeperv1alpha1.UpgradePhaseMigrating))
-				g.Expect(meta.IsStatusConditionTrue(lk.Status.Conditions, TypeDegraded)).To(BeTrue())
+				deg := meta.FindStatusCondition(lk.Status.Conditions, TypeDegraded)
+				g.Expect(deg).NotTo(BeNil())
+				g.Expect(deg.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(deg.Reason).To(Equal("MigrationFailed"))
+				// The Degraded message must explain the cluster stays read-only and how to
+				// recover — and it must be written exactly once (see reconcileMigratingPhase).
+				g.Expect(deg.Message).To(ContainSubstring("read-only maintenance mode"))
 			}, timeout, interval).Should(Succeed())
 			depFail := getDeployment(name)
 			Expect(depFail.Spec.Template.Spec.Containers[0].Image).To(Equal(imageN))
@@ -595,6 +615,98 @@ var _ = Describe("Lakekeeper upgrade choreography (integration)", func() {
 			Expect(warn).NotTo(BeNil())
 			Expect(warn.Status).To(Equal(metav1.ConditionTrue))
 			Expect(warn.Reason).To(Equal("MaintenanceModeUnsupported"))
+		})
+
+		It("reports UpgradeWarning=False/MaintenanceModeSupported when the server is new enough", func() {
+			name := "upgrade-newver"
+			lk := newLakekeeper(name, imageN, 1, "")
+			driveToSteady(lk)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, lk) })
+
+			By("pointing the management API at a server reporting a supported version")
+			ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(infoResponse{
+					Bootstrapped:      true,
+					ServerID:          "srv-1",
+					LakekeeperVersion: minMaintenanceModeVersion,
+				})
+			}))
+			reconciler = &LakekeeperReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				getBaseURL: func(_ *lakekeeperv1alpha1.Lakekeeper) string { return ts.URL },
+			}
+
+			By("triggering an upgrade and entering Quiescing")
+			toUpdate := getLK(name)
+			toUpdate.Spec.Image = imageNp1
+			Expect(k8sClient.Update(ctx, toUpdate)).To(Succeed())
+			reconcileUntilPhase(name, lakekeeperv1alpha1.UpgradePhaseQuiescing)
+
+			warn := meta.FindStatusCondition(getLK(name).Status.Conditions, TypeUpgradeWarning)
+			Expect(warn).NotTo(BeNil())
+			Expect(warn.Status).To(Equal(metav1.ConditionFalse))
+			Expect(warn.Reason).To(Equal("MaintenanceModeSupported"))
+		})
+
+		It("never blocks the upgrade and raises no warning when the version probe fails", func() {
+			name := "upgrade-probefail"
+			lk := newLakekeeper(name, imageN, 1, "")
+			driveToSteady(lk)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, lk) })
+
+			// The reconciler from the outer BeforeEach points at a closed port, so the
+			// version probe fails fast — exercising the best-effort silent-return path.
+			By("triggering an upgrade while the probe is unreachable")
+			toUpdate := getLK(name)
+			toUpdate.Spec.Image = imageNp1
+			Expect(k8sClient.Update(ctx, toUpdate)).To(Succeed())
+
+			By("still entering Quiescing despite the failed probe (best-effort, never blocks)")
+			reconcileUntilPhase(name, lakekeeperv1alpha1.UpgradePhaseQuiescing)
+
+			By("leaving UpgradeWarning unset")
+			Expect(meta.FindStatusCondition(getLK(name).Status.Conditions, TypeUpgradeWarning)).To(BeNil())
+		})
+
+		It("clears a raised UpgradeWarning to UpgradeComplete once the upgrade finishes", func() {
+			name := "upgrade-warncleared"
+			lk := newLakekeeper(name, imageN, 1, "")
+			driveToSteady(lk)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, lk) })
+
+			By("pointing the management API at an old-version server so the warning is raised")
+			ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(infoResponse{
+					Bootstrapped:      true,
+					ServerID:          "srv-1",
+					LakekeeperVersion: "0.12.2",
+				})
+			}))
+			reconciler = &LakekeeperReconciler{
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				getBaseURL: func(_ *lakekeeperv1alpha1.Lakekeeper) string { return ts.URL },
+			}
+
+			toUpdate := getLK(name)
+			toUpdate.Spec.Image = imageNp1
+			Expect(k8sClient.Update(ctx, toUpdate)).To(Succeed())
+			reconcileUntilPhase(name, lakekeeperv1alpha1.UpgradePhaseQuiescing)
+
+			By("confirming the warning is raised for the old version")
+			warn := meta.FindStatusCondition(getLK(name).Status.Conditions, TypeUpgradeWarning)
+			Expect(warn).NotTo(BeNil())
+			Expect(warn.Status).To(Equal(metav1.ConditionTrue))
+
+			By("converging the upgrade clears the warning to UpgradeComplete")
+			driveUpgradeToCompletion(name, imageNp1)
+			warn = meta.FindStatusCondition(getLK(name).Status.Conditions, TypeUpgradeWarning)
+			Expect(warn).NotTo(BeNil())
+			Expect(warn.Status).To(Equal(metav1.ConditionFalse))
+			Expect(warn.Reason).To(Equal("UpgradeComplete"))
 		})
 	})
 
