@@ -109,6 +109,7 @@ IMG=myregistry/lakekeeper-operator:v0.0.1 IMAGE_LOAD_SKIP=true go test -v ./test
 test/e2e/
 ├── e2e_suite_test.go     # Test suite setup
 ├── e2e_test.go           # Manager tests + Lakekeeper E2E tests
+├── upgrade_e2e_test.go   # Read-only-gated upgrade spec (env-gated, see below)
 └── scenarios/            # (future) Complex multi-resource scenarios
 
 test/utils/
@@ -171,7 +172,18 @@ export CONTAINER_TOOL=podman
 
 # Use specific operator image
 export IMG=myregistry/lakekeeper-operator:v0.0.1
+
+# Read-only-gated upgrade spec (skipped unless BOTH are set to two DISTINCT
+# maintenance-mode-capable images, i.e. Lakekeeper >= v0.12.3)
+export LAKEKEEPER_IMAGE_FROM=quay.io/lakekeeper/catalog:v0.12.3
+export LAKEKEEPER_IMAGE_TO=quay.io/lakekeeper/catalog:v0.12.4
 ```
+
+The "Read-Only-Gated Upgrade" spec deploys image `FROM`, upgrades to `TO`, and
+asserts reads never return 503 while writes are blocked (503 + `Retry-After`) only
+during the migration window. It is **skipped** when the two env vars above are not
+set to two distinct images, because the maintenance-mode feature requires
+Lakekeeper >= v0.12.3 and a real version change to exercise the migration path.
 
 ## CI/CD Integration
 

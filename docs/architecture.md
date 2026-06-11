@@ -92,8 +92,14 @@ type LakekeeperStatus struct {
     ObservedGeneration *int64             `json:"observedGeneration,omitempty"`
     Replicas           *int32             `json:"replicas,omitempty"`
     ReadyReplicas      *int32             `json:"readyReplicas,omitempty"`
+    UpgradePhase       UpgradePhase       `json:"upgradePhase,omitempty"`
+    UpgradeTargetImage string             `json:"upgradeTargetImage,omitempty"`
 }
 ```
+
+`UpgradePhase` is empty when no upgrade is in progress, or one of `Quiescing`,
+`Migrating`, `RollingOut` during a [read-only-gated upgrade](#read-only-gated-upgrades).
+`UpgradeTargetImage` records the `spec.image` an in-flight upgrade is converging toward.
 
 **Condition Types**:
 
@@ -104,6 +110,8 @@ type LakekeeperStatus struct {
 | `Migrated` | Database migration succeeded for the current spec hash |
 | `Bootstrapped` | Server has been bootstrapped (by operator or externally) |
 | `ConfigWarning` | One or more configured fields are not yet implemented |
+| `Upgrading` | A read-only-gated upgrade is in progress; reason tracks the phase |
+| `UpgradeWarning` | Running server predates `MAINTENANCE_MODE` (read-only gating may be ineffective) |
 
 ## Controller Pattern
 
@@ -150,7 +158,17 @@ type LakekeeperStatus struct {
                   │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│  6. Reconcile Migration Job (hash-based)            │
+│  6. Reconcile Upgrade (read-only-gated state machine)│
+│     - Active upgrade? → owns Deployment + Migration  │
+│       choreography this cycle, returns               │
+│     - No upgrade applies (or one just finished)      │
+│       → fall through to the normal path below        │
+│     See "Read-Only-Gated Upgrades".                  │
+└─────────────────┬───────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────┐
+│  7. Reconcile Migration Job (hash-based)            │
 │     - Compute spec hash; derive Job name            │
 │     - Job missing → create Job, set Migrated=False, │
 │       RequeueAfter 10s                              │
@@ -163,20 +181,21 @@ type LakekeeperStatus struct {
                   │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│  7. Reconcile Deployment (CreateOrUpdate)           │
-│     - Env vars built inline from spec               │
+│  8. Reconcile Deployment (CreateOrUpdate)           │
+│     - Image + read-only flag chosen by intent       │
+│     - maxUnavailable:0 / maxSurge:1 rolling update  │
 │     - SSL certs mounted from Secrets as volumes     │
 └─────────────────┬───────────────────────────────────┘
                   │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│  8. Reconcile Services (CreateOrUpdate)             │
+│  9. Reconcile Services (CreateOrUpdate)             │
 │     - Main service + metrics service                │
 └─────────────────┬───────────────────────────────────┘
                   │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│  9. Update Status                                   │
+│  10. Update Status                                  │
 │     - Replica counts from Deployment status         │
 │     - Call syncBootstrapStatus if ReadyReplicas > 0 │
 │     - Set Ready / Degraded conditions               │
@@ -184,7 +203,7 @@ type LakekeeperStatus struct {
                   │
                   ▼
 ┌─────────────────────────────────────────────────────┐
-│  10. Return                                         │
+│  11. Return                                         │
 │     - BootstrappedAt == nil?                        │
 │       → RequeueAfter poll interval (default 15s)   │
 │     - BootstrappedAt set? → Done (no requeue)       │
@@ -276,6 +295,84 @@ spec:
                 key: password
           # ... (other env vars)
 ```
+
+The migrate Job always runs with the new image in normal read-write mode — it
+never receives the `LAKEKEEPER__MAINTENANCE_MODE` flag (see below), so it is free
+to write the schema.
+
+## Read-Only-Gated Upgrades
+
+When `spec.image` changes to a version that requires a database migration, the
+naive sequence — migrate with the new image, then roll the Deployment forward —
+leaves the **old** pods serving read-write traffic against a schema that is being
+migrated to a newer version. Lakekeeper publishes no version-skew compatibility
+guarantee, so an old binary writing into a half-migrated schema risks errors and
+data corruption.
+
+To close that window, the operator (by default) gates the migration behind
+Lakekeeper's read-only maintenance mode. This requires Lakekeeper **>= v0.12.3**,
+which introduced `LAKEKEEPER__MAINTENANCE_MODE=read-only`: the server rejects
+mutating requests (anything other than `GET`/`HEAD`/`OPTIONS` on `/catalog/v1`
+and `/management/v1`) with `503 Service Unavailable` + `Retry-After`, leaving
+reads and `/health` unaffected. The flag is read once at startup and is not
+dynamic, so applying it requires a pod restart.
+
+### Strategy
+
+`spec.upgrade.strategy` selects the choreography:
+
+| Strategy | Behaviour |
+|----------|-----------|
+| `ReadOnlyMigration` (default) | Quiesce into read-only mode, migrate, then roll forward. Reads stay available; writes are blocked only during the migration window. |
+| `Simple` | Legacy path: migrate with the new image, then roll the Deployment forward. No read-only gating. |
+
+### Phase machine
+
+A `status.upgradePhase` field drives the choreography. It is level-based, written
+**before** each mutating step, and fully resumable after an operator restart.
+
+```
+spec.image: N → N+1
+──────────────────────────────────────────────────────────────────────
+Phase        Deployment pods run      Mode        DB schema   migrate Job
+──────────────────────────────────────────────────────────────────────
+(start)      image N                  read-write  N           —
+Quiescing    image N + MAINTENANCE    read-only   N           —
+Migrating    image N (read-only)      read-only   N → N+1     Job(image N+1)
+RollingOut   image N+1 (flag removed)  read-write  N+1         —
+(done)       image N+1                 read-write  N+1         —
+```
+
+The quiesce step runs only when **all** of: a migration is needed, a Deployment
+already exists on an image different from `spec.image`, desired replicas > 0, and
+the strategy is `ReadOnlyMigration`. Otherwise the normal migrate→deploy path runs
+unchanged (initial install, replica/config-only changes, `Simple` strategy).
+
+Each phase advances only once the Deployment rollout has fully settled
+(`Generation == ObservedGeneration`, all replicas updated, available, ready, and
+none unavailable). The Deployment uses a `maxUnavailable: 0` / `maxSurge: 1`
+rolling-update strategy so a ready pod is always present — reads never drop. For a
+single-replica instance this briefly runs two pods, a transient resource cost.
+
+### Failure and recovery
+
+If the migration Job fails permanently while `Migrating`, the machine **stays** in
+`Migrating` with `Degraded=True`; the old pods remain safely in read-only mode (no
+old binary writes a migrating schema). Re-applying `spec.image` (to a fixed image
+or by rolling back) resets the state machine and re-converges.
+
+Editing `spec.image` again mid-upgrade retargets the upgrade: `status.upgradeTargetImage`
+tracks the goal, and a change is detected and the machine restarts toward the new target.
+
+### Interactions
+
+- **Version detection.** On entering an upgrade the operator probes
+  `GET /management/v1/info`. If the running version predates v0.12.3 it sets an
+  `UpgradeWarning` condition (read-only gating may be ineffective) but still
+  proceeds — the probe is best-effort and never blocks.
+- **Bootstrap.** Detection (`GET /management/v1/info`) is unaffected by read-only
+  mode, so it keeps working. Auto-bootstrap's mutating `POST` is deferred while an
+  upgrade holds the server read-only (`Bootstrapped=False/PausedDuringUpgrade`).
 
 ## Bootstrap
 

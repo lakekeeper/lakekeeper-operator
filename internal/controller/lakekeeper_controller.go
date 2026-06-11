@@ -49,11 +49,13 @@ import (
 
 const (
 	// Condition types
-	TypeReady         = "Ready"
-	TypeDegraded      = "Degraded"
-	TypeMigrated      = "Migrated"
-	TypeBootstrapped  = "Bootstrapped"
-	TypeConfigWarning = "ConfigWarning"
+	TypeReady          = "Ready"
+	TypeDegraded       = "Degraded"
+	TypeMigrated       = "Migrated"
+	TypeBootstrapped   = "Bootstrapped"
+	TypeConfigWarning  = "ConfigWarning"
+	TypeUpgrading      = "Upgrading"
+	TypeUpgradeWarning = "UpgradeWarning"
 
 	// Finalizer name
 	finalizerName = "lakekeeper.k8s.lakekeeper.io/finalizer"
@@ -62,6 +64,14 @@ const (
 	migrationJobBackoffLimit = int32(3)         // Number of retries before Job is marked as failed
 	migrationJobTTLSeconds   = int32(600)       // TTL for completed Jobs (10 minutes)
 	migrationJobRequeueAfter = 10 * time.Second // How long to wait before checking Job status again
+
+	// Upgrade choreography configuration
+	upgradeRequeueAfter = 10 * time.Second // How long to wait before re-checking a rollout during an upgrade
+
+	// minMaintenanceModeVersion is the first Lakekeeper release that ships
+	// LAKEKEEPER__MAINTENANCE_MODE=read-only. Running an older server makes the
+	// read-only upgrade gating ineffective.
+	minMaintenanceModeVersion = "0.12.3"
 
 	// Bootstrap configuration
 	bootstrapHTTPTimeout  = 3 * time.Second  // Timeout for bootstrap HTTP calls (short to avoid blocking reconcile loop)
@@ -154,13 +164,21 @@ func (r *LakekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Check for unimplemented configuration fields (informational only, never blocks reconciliation)
 	r.reconcileConfigWarnings(ctx, lk)
 
+	// Drive the read-only-gated upgrade state machine. When an upgrade is active it
+	// owns the Deployment/migration choreography and returns done=true; when no
+	// upgrade applies (or one just completed) it returns done=false and the normal
+	// path below runs this cycle.
+	if result, done, err := r.reconcileUpgrade(ctx, lk); done {
+		return result, err
+	}
+
 	// Run migration Job (blocks deployment until complete)
 	if result, done, err := r.reconcileMigration(ctx, lk); done {
 		return result, err
 	}
 
 	// Reconcile the Deployment (only after successful migration)
-	if err := r.reconcileDeployment(ctx, lk); err != nil {
+	if err := r.reconcileDeployment(ctx, lk, deploymentIntent{image: lk.Spec.Image, maintenanceMode: false}); err != nil {
 		logger.Error(err, "Failed to reconcile Deployment")
 		r.setCondition(lk, TypeDegraded, metav1.ConditionTrue, "DeploymentReconciliationFailed", err.Error())
 		r.setCondition(lk, TypeReady, metav1.ConditionFalse, "DeploymentReconciliationFailed", "Failed to reconcile Deployment")
@@ -421,8 +439,16 @@ func (r *LakekeeperReconciler) collectSecretReferences(lk *lakekeeperv1alpha1.La
 	return refs
 }
 
-// reconcileDeployment creates or updates the Lakekeeper Deployment
-func (r *LakekeeperReconciler) reconcileDeployment(ctx context.Context, lk *lakekeeperv1alpha1.Lakekeeper) error {
+// deploymentIntent captures the parts of the rendered Deployment that vary across
+// the upgrade choreography: which image the pods run and whether the read-only
+// maintenance flag is injected. Everything else is derived from the spec.
+type deploymentIntent struct {
+	image           string
+	maintenanceMode bool
+}
+
+// reconcileDeployment creates or updates the Lakekeeper Deployment to match intent.
+func (r *LakekeeperReconciler) reconcileDeployment(ctx context.Context, lk *lakekeeperv1alpha1.Lakekeeper, intent deploymentIntent) error {
 	logger := log.FromContext(ctx)
 
 	deployment := &appsv1.Deployment{
@@ -443,13 +469,18 @@ func (r *LakekeeperReconciler) reconcileDeployment(ctx context.Context, lk *lake
 		}
 
 		// Set spec
-		replicas := ptr.To(int32(1))
-		if lk.Spec.Replicas != nil {
-			replicas = lk.Spec.Replicas
-		}
-
 		deployment.Spec = appsv1.DeploymentSpec{
-			Replicas: replicas,
+			Replicas: ptr.To(r.desiredReplicas(lk)),
+			// maxUnavailable:0 keeps reads available throughout a rolling update
+			// (critical during the read-only-gated upgrade); maxSurge:1 briefly runs
+			// one extra pod, so single-replica instances momentarily run 2 pods.
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxUnavailable: ptr.To(intstr.FromInt32(0)),
+					MaxSurge:       ptr.To(intstr.FromInt32(1)),
+				},
+			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
@@ -461,9 +492,9 @@ func (r *LakekeeperReconciler) reconcileDeployment(ctx context.Context, lk *lake
 					Containers: []corev1.Container{
 						{
 							Name:  "lakekeeper",
-							Image: lk.Spec.Image,
+							Image: intent.image,
 							Args:  []string{"serve"},
-							Env:   r.buildEnvVars(lk),
+							Env:   r.buildDeploymentEnvVars(lk, intent.maintenanceMode),
 							Ports: []corev1.ContainerPort{
 								{
 									Name:          "http",
@@ -633,10 +664,7 @@ func (r *LakekeeperReconciler) updateStatus(ctx context.Context, lk *lakekeeperv
 	lk.Status.ObservedGeneration = &lk.Generation
 
 	// Set conditions based on Deployment status
-	desiredReplicas := int32(1)
-	if lk.Spec.Replicas != nil {
-		desiredReplicas = *lk.Spec.Replicas
-	}
+	desiredReplicas := r.desiredReplicas(lk)
 
 	// Check if at least one pod is ready
 	if desiredReplicas == 0 {
@@ -680,6 +708,11 @@ func (r *LakekeeperReconciler) updateStatus(ctx context.Context, lk *lakekeeperv
 type infoResponse struct {
 	Bootstrapped bool   `json:"bootstrapped"`
 	ServerID     string `json:"server-id"`
+	// Version is the deprecated plain version field; always equal to
+	// LakekeeperVersion. Read as a fallback for older servers.
+	Version string `json:"version"`
+	// LakekeeperVersion is the SemVer of the upstream lakekeeper crate.
+	LakekeeperVersion string `json:"lakekeeper-version"`
 }
 
 // getBootstrapCheckInterval returns the configured bootstrap poll interval,
@@ -708,13 +741,7 @@ func (r *LakekeeperReconciler) syncBootstrapStatus(ctx context.Context, lk *lake
 		return nil
 	}
 
-	var baseURL string
-	if r.getBaseURL != nil {
-		baseURL = r.getBaseURL(lk)
-	} else {
-		port := r.getListenPort(lk)
-		baseURL = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", lk.Name, lk.Namespace, port)
-	}
+	baseURL := r.baseURL(lk)
 
 	info, err := r.fetchInfo(ctx, baseURL)
 	if err != nil {
@@ -740,6 +767,15 @@ func (r *LakekeeperReconciler) syncBootstrapStatus(ctx context.Context, lk *lake
 		// Auto-bootstrap disabled: report current state only
 		r.setCondition(lk, TypeBootstrapped, metav1.ConditionFalse, "NotBootstrapped",
 			"Lakekeeper server is not bootstrapped. Set spec.bootstrap.enabled=true to bootstrap automatically.")
+		return nil
+	}
+
+	// Auto-bootstrap requires a mutating POST, which a read-only server rejects with
+	// 503. While an upgrade holds the server in maintenance mode, defer the POST;
+	// detection (the GET above) still works and the next reconcile retries.
+	if lk.Status.UpgradePhase != "" {
+		r.setCondition(lk, TypeBootstrapped, metav1.ConditionFalse, "PausedDuringUpgrade",
+			"Auto-bootstrap is paused while the server is in read-only maintenance mode for an upgrade")
 		return nil
 	}
 

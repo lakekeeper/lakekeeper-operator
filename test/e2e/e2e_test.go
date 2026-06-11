@@ -708,7 +708,7 @@ spec:
 			// allowall does not auto-bootstrap; we must explicitly call the bootstrap endpoint
 			// to simulate what a real user would do before the operator can detect the state.
 			Eventually(func(g Gomega) {
-				statusCode, _, err := httpPostService(
+				statusCode, err := httpPostService(
 					testNamespace,
 					lakekeeperName,
 					8181,
@@ -815,16 +815,17 @@ func doPortForwardRequest( //nolint:lll
 }
 
 // httpPostService port-forwards to service and performs a POST with a JSON body,
-// returning the HTTP status code and response body.
-func httpPostService(namespace, service string, port int32, path, jsonBody string) (int, string, error) {
+// returning the HTTP status code.
+func httpPostService(namespace, service string, port int32, path, jsonBody string) (int, error) {
 	req, err := http.NewRequest(http.MethodPost, //nolint:noctx
 		fmt.Sprintf("http://placeholder/%s", strings.TrimPrefix(path, "/")),
 		strings.NewReader(jsonBody))
 	if err != nil {
-		return 0, "", fmt.Errorf("create request: %w", err)
+		return 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return doPortForwardRequest(namespace, service, port, 20000, req)
+	status, _, err := doPortForwardRequest(namespace, service, port, 20000, req)
+	return status, err
 }
 
 // httpGetService port-forwards to service and performs a GET, returning the response body.

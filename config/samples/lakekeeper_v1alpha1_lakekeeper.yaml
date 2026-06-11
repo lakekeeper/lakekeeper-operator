@@ -9,10 +9,20 @@ metadata:
 spec:
   # Container image
   image: quay.io/lakekeeper/catalog:latest
-  
+
   # Number of replicas
   replicas: 2
-  
+
+  # Upgrade strategy (optional - defaults to ReadOnlyMigration)
+  # ReadOnlyMigration: on an image change that needs a migration, the operator
+  #   first rolls the existing pods into read-only maintenance mode, runs the
+  #   migration, then rolls forward to the new image. Reads stay available; writes
+  #   return 503 only during the migration window. Requires Lakekeeper >= v0.12.3.
+  # Simple: legacy behaviour — migrate with the new image, then roll forward
+  #   (no read-only gating).
+  upgrade:
+    strategy: ReadOnlyMigration
+
   # Resource requirements
   resources:
     requests:

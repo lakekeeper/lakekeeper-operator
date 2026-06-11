@@ -62,6 +62,48 @@ const (
 	AuthzBackendCedar AuthzBackend = "cedar"
 )
 
+// UpgradePhase tracks the operator's position in the read-only-gated upgrade
+// state machine. An empty value means no upgrade is in progress.
+type UpgradePhase string
+
+const (
+	// UpgradePhaseQuiescing means the operator is rolling the existing pods
+	// (still on the old image) into read-only maintenance mode before migrating.
+	UpgradePhaseQuiescing UpgradePhase = "Quiescing"
+	// UpgradePhaseMigrating means the read-only rollout is complete and the
+	// database migration Job (new image) is running.
+	UpgradePhaseMigrating UpgradePhase = "Migrating"
+	// UpgradePhaseRollingOut means the migration succeeded and the operator is
+	// rolling the Deployment forward to the new image with maintenance mode removed.
+	UpgradePhaseRollingOut UpgradePhase = "RollingOut"
+)
+
+// UpgradeStrategy selects how the operator sequences a Lakekeeper version upgrade.
+// +kubebuilder:validation:Enum=ReadOnlyMigration;Simple
+type UpgradeStrategy string
+
+const (
+	// UpgradeStrategyReadOnlyMigration quiesces the existing pods into read-only
+	// maintenance mode before migrating, keeping reads available and preventing an
+	// old binary from writing into a migrating schema. This is the default.
+	UpgradeStrategyReadOnlyMigration UpgradeStrategy = "ReadOnlyMigration"
+	// UpgradeStrategySimple preserves the legacy behaviour: migrate with the new
+	// image, then roll the Deployment forward. No read-only gating.
+	UpgradeStrategySimple UpgradeStrategy = "Simple"
+)
+
+// UpgradeConfig configures how version upgrades (changes to spec.image that
+// require a database migration) are sequenced.
+type UpgradeConfig struct {
+	// Strategy selects the upgrade choreography.
+	// ReadOnlyMigration (default) gates writes behind read-only maintenance mode
+	// during the migration window; Simple uses the legacy migrate-then-deploy path.
+	// +kubebuilder:validation:Enum=ReadOnlyMigration;Simple
+	// +kubebuilder:default=ReadOnlyMigration
+	// +optional
+	Strategy UpgradeStrategy `json:"strategy,omitempty"`
+}
+
 // LakekeeperSpec defines the desired state of Lakekeeper.
 type LakekeeperSpec struct {
 	// Image specifies the Lakekeeper container image.
@@ -120,6 +162,11 @@ type LakekeeperSpec struct {
 	// Bootstrap configures automatic server initialization.
 	// +optional
 	Bootstrap *BootstrapConfig `json:"bootstrap,omitempty"`
+
+	// Upgrade configures how version upgrades are sequenced.
+	// Defaults to the ReadOnlyMigration strategy when omitted.
+	// +optional
+	Upgrade *UpgradeConfig `json:"upgrade,omitempty"`
 }
 
 // DatabaseConfig configures the database connection.
@@ -648,6 +695,18 @@ type LakekeeperStatus struct {
 	// ReadyReplicas is the number of ready pods.
 	// +optional
 	ReadyReplicas *int32 `json:"readyReplicas,omitempty"`
+
+	// UpgradePhase tracks the operator's position in the read-only-gated upgrade
+	// choreography. An empty value means no upgrade is in progress.
+	// +kubebuilder:validation:Enum=Quiescing;Migrating;RollingOut
+	// +optional
+	UpgradePhase UpgradePhase `json:"upgradePhase,omitempty"`
+
+	// UpgradeTargetImage records the spec.image an in-flight upgrade is converging
+	// toward. Used to detect a mid-upgrade re-edit of spec.image and reset the
+	// state machine. Empty when no upgrade is in progress.
+	// +optional
+	UpgradeTargetImage string `json:"upgradeTargetImage,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -657,6 +716,7 @@ type LakekeeperStatus struct {
 // +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".spec.replicas",description="Desired replicas"
 // +kubebuilder:printcolumn:name="Ready",type="integer",JSONPath=".status.readyReplicas",description="Ready replicas"
 // +kubebuilder:printcolumn:name="Bootstrapped",type="date",JSONPath=".status.bootstrappedAt",description="Bootstrap timestamp"
+// +kubebuilder:printcolumn:name="Upgrade",type="string",JSONPath=".status.upgradePhase",description="In-progress upgrade phase"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Lakekeeper is the Schema for the lakekeepers API.

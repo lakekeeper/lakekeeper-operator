@@ -733,6 +733,13 @@ var _ = Describe("Lakekeeper Controller", func() {
 			Expect(k8sClient.Get(ctx, typeNamespacedName, lakekeeper)).To(Succeed())
 
 			lakekeeper.Spec.Image = testImageV2
+			// Use the Simple strategy: this spec asserts the direct migrate-then-deploy
+			// image update. The default ReadOnlyMigration strategy gates the image change
+			// behind a read-only quiesce rollout (covered by the upgrade choreography specs),
+			// which never completes in envtest without simulating Deployment rollout status.
+			lakekeeper.Spec.Upgrade = &lakekeeperv1alpha1.UpgradeConfig{
+				Strategy: lakekeeperv1alpha1.UpgradeStrategySimple,
+			}
 			Expect(k8sClient.Update(ctx, lakekeeper)).To(Succeed())
 
 			By("Reconciling to apply the change")

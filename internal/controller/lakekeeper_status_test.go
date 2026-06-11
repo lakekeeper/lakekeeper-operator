@@ -413,6 +413,14 @@ var _ = Describe("Lakekeeper Controller", func() {
 					Spec: lakekeeperv1alpha1.LakekeeperSpec{
 						Image:    "lakekeeper:v1.0.0",
 						Replicas: ptr.To(int32(1)),
+						// Use the Simple strategy so a mid-test image change takes the direct
+						// migrate-then-deploy path. The default ReadOnlyMigration strategy would
+						// gate the image change behind a read-only quiesce rollout (covered by the
+						// upgrade choreography specs), which never completes in envtest without
+						// simulating Deployment rollout status.
+						Upgrade: &lakekeeperv1alpha1.UpgradeConfig{
+							Strategy: lakekeeperv1alpha1.UpgradeStrategySimple,
+						},
 						Database: lakekeeperv1alpha1.DatabaseConfig{
 							Type: lakekeeperv1alpha1.DatabaseTypePostgres,
 							Postgres: &lakekeeperv1alpha1.PostgresConfig{
