@@ -31,6 +31,7 @@ Operator-specific rules that the generic skills above do not encode:
 - **Store external IDs (Lakekeeper UUIDs) in `.status`, never in `.spec`.**
 - **CRD naming:** `Lakekeeper`-prefixed kinds to avoid Kubernetes keyword conflicts (`LakekeeperWarehouse`, `LakekeeperProject`, …). API domain: `k8s.lakekeeper.io`.
 - **Lakekeeper Management API** calls go through the `go-lakekeeper` SDK — no raw HTTP. (Not yet wired in; confirm the current import path before adding it.)
+- **Image changes are read-only-gated by default** (`ReadOnlyMigration` upgrade strategy: quiesce → migrate → roll-forward). `spec.upgrade.strategy: Simple` restores the legacy direct migrate-then-swap. See `docs/architecture.md`.
 - **Stack:** operator-sdk v1.42.2 / Kubebuilder v4, controller-runtime, Ginkgo v2 + Gomega, envtest.
 
 <!-- team-init: managed sections -->
