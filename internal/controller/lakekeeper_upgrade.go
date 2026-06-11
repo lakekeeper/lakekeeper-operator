@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -81,9 +82,14 @@ func (r *LakekeeperReconciler) enterUpgradeIfNeeded(ctx context.Context, lk *lak
 
 	needsMig, err := r.needsMigration(ctx, lk)
 	if err != nil {
-		// A permanent migration failure is surfaced by the normal migration path;
-		// don't start an upgrade on top of it.
-		return ctrl.Result{}, false, nil
+		if errors.Is(err, errMigrationFailed) {
+			// A permanent migration failure is surfaced by the normal migration
+			// path; don't start an upgrade on top of it.
+			return ctrl.Result{}, false, nil
+		}
+		// Transient error while checking migration status (e.g. API server
+		// unavailable). Requeue with backoff rather than silently proceeding.
+		return ctrl.Result{}, true, err
 	}
 
 	liveImage, exists, err := r.liveDeploymentImage(ctx, lk)
@@ -128,11 +134,16 @@ func (r *LakekeeperReconciler) reconcileQuiescing(ctx context.Context, lk *lakek
 		return ctrl.Result{}, true, err
 	}
 
-	// Drift guard: the Deployment is gone or already on the target image (e.g. the
-	// operator crashed after RollingOut began). Skip straight to RollingOut.
+	// Drift guard: the Deployment was deleted or externally patched to the target
+	// image while we were Quiescing (the normal path never reaches Quiescing with
+	// liveImage == spec.Image, since reconcileQuiescing only ever renders the old
+	// image). Re-enter at Migrating — not RollingOut — so the migration still runs
+	// against the new image before any new-image pods can serve writes. Jumping
+	// straight to RollingOut would promote the image first and run the migration
+	// only afterwards via the normal tail, defeating the read-only gate.
 	if !exists || liveImage == lk.Spec.Image {
-		return r.advanceTo(ctx, lk, lakekeeperv1alpha1.UpgradePhaseRollingOut,
-			"Rolling out the new image with maintenance mode disabled")
+		return r.advanceTo(ctx, lk, lakekeeperv1alpha1.UpgradePhaseMigrating,
+			"Deployment already on the target image; running migration before rollout")
 	}
 
 	if err := r.reconcileDeployment(ctx, lk, deploymentIntent{image: liveImage, maintenanceMode: true}); err != nil {

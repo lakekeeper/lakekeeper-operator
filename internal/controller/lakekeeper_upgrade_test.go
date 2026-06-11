@@ -477,6 +477,80 @@ var _ = Describe("Lakekeeper upgrade choreography (integration)", func() {
 			By("exactly two migrate Jobs exist (one per image), with no duplicates")
 			Expect(countMigrationJobs(name)).To(Equal(2))
 		})
+
+		It("drift guard: re-enters at Migrating (not RollingOut) when the Deployment is deleted mid-Quiescing", func() {
+			name := "upgrade-drift-gone"
+			lk := newLakekeeper(name, imageN, 1, "")
+			driveToSteady(lk)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, lk) })
+
+			By("entering Quiescing on an image upgrade")
+			toUpdate := getLK(name)
+			toUpdate.Spec.Image = imageNp1
+			Expect(k8sClient.Update(ctx, toUpdate)).To(Succeed())
+			reconcileUntilPhase(name, lakekeeperv1alpha1.UpgradePhaseQuiescing)
+
+			By("deleting the Deployment out-of-band while Quiescing")
+			Expect(k8sClient.Delete(ctx, getDeployment(name))).To(Succeed())
+
+			By("re-entering at Migrating, never skipping straight to RollingOut")
+			reconcileUntilPhase(name, lakekeeperv1alpha1.UpgradePhaseMigrating)
+
+			By("creating the new-image migrate Job while no Deployment has been recreated")
+			Eventually(func(g Gomega) {
+				_, err := reconcileOnce(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				_, ok := migrationJobExists(getLK(name))
+				g.Expect(ok).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+			// The migration must run before any new-image pods are recreated, so the
+			// Deployment is still absent. The old buggy path (jump to RollingOut)
+			// would have recreated it on the new image before migrating.
+			depErr := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &appsv1.Deployment{})
+			Expect(errors.IsNotFound(depErr)).To(BeTrue(),
+				"the new-image Deployment must not be recreated until the migration completes")
+
+			By("converging to N+1 once migration and rollout complete")
+			Expect(completeMigrationJob(ctx, getLK(name), timeout)).To(Succeed())
+			// Reconcile until RollingOut has recreated the Deployment, then let the
+			// shared convergence helper (which needs the Deployment to exist) finish.
+			Eventually(func(g Gomega) {
+				_, err := reconcileOnce(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(k8sClient.Get(ctx,
+					types.NamespacedName{Name: name, Namespace: namespace}, &appsv1.Deployment{})).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+			driveUpgradeToCompletion(name, imageNp1)
+		})
+
+		It("drift guard: re-enters at Migrating when the Deployment is already on the target image", func() {
+			name := "upgrade-drift-ontarget"
+			lk := newLakekeeper(name, imageN, 1, "")
+			driveToSteady(lk)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, lk) })
+
+			By("entering Quiescing on an image upgrade")
+			toUpdate := getLK(name)
+			toUpdate.Spec.Image = imageNp1
+			Expect(k8sClient.Update(ctx, toUpdate)).To(Succeed())
+			reconcileUntilPhase(name, lakekeeperv1alpha1.UpgradePhaseQuiescing)
+
+			By("patching the Deployment image to the target out-of-band")
+			dep := getDeployment(name)
+			dep.Spec.Template.Spec.Containers[0].Image = imageNp1
+			Expect(k8sClient.Update(ctx, dep)).To(Succeed())
+
+			By("re-entering at Migrating rather than skipping to RollingOut")
+			reconcileUntilPhase(name, lakekeeperv1alpha1.UpgradePhaseMigrating)
+
+			By("converging to N+1")
+			driveUpgradeToCompletion(name, imageNp1)
+		})
+
+		// NOTE: the unknown-phase default branch in reconcileUpgrade cannot be reached
+		// through the API — status.upgradePhase carries an Enum validation marker, so
+		// the API server rejects any out-of-enum value. It is covered as a unit test
+		// (fake client, no CRD validation) in lakekeeper_upgrade_unit_test.go.
 	})
 
 	Context("version compatibility warning", func() {

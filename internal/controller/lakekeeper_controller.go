@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -77,6 +78,12 @@ const (
 	bootstrapHTTPTimeout  = 3 * time.Second  // Timeout for bootstrap HTTP calls (short to avoid blocking reconcile loop)
 	bootstrapPollInterval = 15 * time.Second // How often to poll /management/v1/info until bootstrap is confirmed
 )
+
+// errMigrationFailed marks a permanent migration failure (the migration Job
+// reached its backoff limit). Callers distinguish it from transient errors with
+// errors.Is: a permanent failure halts requeues until the spec changes, whereas
+// a transient error (e.g. API server unavailable) should requeue with backoff.
+var errMigrationFailed = errors.New("migration permanently failed")
 
 // LakekeeperReconciler reconciles a Lakekeeper object
 type LakekeeperReconciler struct {
@@ -247,6 +254,12 @@ func (r *LakekeeperReconciler) reconcileMigration(ctx context.Context, lk *lakek
 	// Check if migration Job needed
 	jobNeeded, err := r.needsMigration(ctx, lk)
 	if err != nil {
+		if !errors.Is(err, errMigrationFailed) {
+			// Transient error (e.g. API server unavailable while checking the Job).
+			// Surface it so controller-runtime requeues with backoff.
+			logger.Error(err, "Failed to determine migration status; will retry")
+			return ctrl.Result{}, true, err
+		}
 		// Migration failed permanently — conditions capture the failure.
 		// Do not requeue automatically; user must change spec to recover.
 		logger.Error(err, "Migration failed permanently")
@@ -1674,10 +1687,11 @@ func (r *LakekeeperReconciler) needsMigration(ctx context.Context, lk *lakekeepe
 		return false, nil
 	}
 
-	if job.Status.Failed >= migrationJobBackoffLimit {
-		// Job failed too many times with current spec - permanent failure
+	if isJobFailed(job) {
+		// Job reached its backoff limit — permanent failure for this spec.
 		logger.Error(nil, "Migration Job failed permanently", "jobName", expectedJobName)
-		return false, fmt.Errorf("migration job %s failed after %d attempts", expectedJobName, migrationJobBackoffLimit)
+		return false, fmt.Errorf("migration job %s failed after %d attempts: %w",
+			expectedJobName, migrationJobBackoffLimit, errMigrationFailed)
 	}
 
 	// Job still running - wait
@@ -1796,12 +1810,26 @@ func (r *LakekeeperReconciler) getMigrationJob(ctx context.Context, lk *lakekeep
 
 // isJobComplete returns true if the Job has finished (either succeeded or failed permanently).
 func isJobComplete(job *batchv1.Job) bool {
-	return job.Status.Succeeded > 0 || job.Status.Failed >= migrationJobBackoffLimit
+	return isJobSuccessful(job) || isJobFailed(job)
 }
 
 // isJobSuccessful returns true if the Job completed successfully.
 func isJobSuccessful(job *batchv1.Job) bool {
 	return job.Status.Succeeded > 0
+}
+
+// isJobFailed reports whether Kubernetes has marked the Job as permanently failed
+// (the JobFailed condition, set with reason BackoffLimitExceeded once retries are
+// exhausted). Keying on the condition rather than counting job.Status.Failed
+// avoids an off-by-one against the backoff limit and is robust to the
+// restartPolicy=OnFailure counting semantics.
+func isJobFailed(job *batchv1.Job) bool {
+	for _, c := range job.Status.Conditions {
+		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 // resourceRequirementsOrEmpty dereferences a *corev1.ResourceRequirements pointer,

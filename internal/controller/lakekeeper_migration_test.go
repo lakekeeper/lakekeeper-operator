@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -32,6 +34,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	lakekeeperv1alpha1 "github.com/lakekeeper/lakekeeper-operator/api/v1alpha1"
@@ -669,11 +672,14 @@ var _ = Describe("Lakekeeper Controller", func() {
 				Expect(isJobComplete(job)).To(BeTrue())
 			})
 
-			It("should return true when job has failed 3 times", func() {
+			It("should return true when the Job is marked Failed (backoff limit exceeded)", func() {
 				job := &batchv1.Job{
 					Status: batchv1.JobStatus{
 						Succeeded: 0,
 						Failed:    3,
+						Conditions: []batchv1.JobCondition{
+							{Type: batchv1.JobFailed, Status: corev1.ConditionTrue},
+						},
 					},
 				}
 
@@ -692,7 +698,9 @@ var _ = Describe("Lakekeeper Controller", func() {
 				Expect(isJobComplete(job)).To(BeFalse())
 			})
 
-			It("should return false when job has failed less than 3 times", func() {
+			It("should return false while pods have failed but the Job is not yet terminal", func() {
+				// Failures have accrued but Kubernetes has not set the JobFailed
+				// condition, so retries may still be pending — not complete.
 				job := &batchv1.Job{
 					Status: batchv1.JobStatus{
 						Succeeded: 0,
@@ -734,6 +742,102 @@ var _ = Describe("Lakekeeper Controller", func() {
 				}
 
 				Expect(isJobSuccessful(job)).To(BeFalse())
+			})
+		})
+
+		Context("isJobFailed", func() {
+			It("should return true when the JobFailed condition is True", func() {
+				job := &batchv1.Job{
+					Status: batchv1.JobStatus{
+						Conditions: []batchv1.JobCondition{
+							{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded"},
+						},
+					},
+				}
+
+				Expect(isJobFailed(job)).To(BeTrue())
+			})
+
+			It("should return false when pods have failed but the JobFailed condition is absent", func() {
+				// Kubernetes only sets JobFailed once retries are exhausted; a raw
+				// Failed count below the terminal point must not read as failed.
+				job := &batchv1.Job{
+					Status: batchv1.JobStatus{Failed: 3},
+				}
+
+				Expect(isJobFailed(job)).To(BeFalse())
+			})
+
+			It("should return false when the JobFailed condition is False", func() {
+				job := &batchv1.Job{
+					Status: batchv1.JobStatus{
+						Conditions: []batchv1.JobCondition{
+							{Type: batchv1.JobFailed, Status: corev1.ConditionFalse},
+						},
+					},
+				}
+
+				Expect(isJobFailed(job)).To(BeFalse())
+			})
+		})
+
+		Context("needsMigration error classification", func() {
+			// A minimal Postgres-backed spec; only Image + Database feed the Job hash.
+			newSpecLK := func() *lakekeeperv1alpha1.Lakekeeper {
+				return &lakekeeperv1alpha1.Lakekeeper{
+					ObjectMeta: metav1.ObjectMeta{Name: "classify", Namespace: "default"},
+					Spec: lakekeeperv1alpha1.LakekeeperSpec{
+						Image: "lakekeeper:v1.0.0",
+						Database: lakekeeperv1alpha1.DatabaseConfig{
+							Type:     lakekeeperv1alpha1.DatabaseTypePostgres,
+							Postgres: &lakekeeperv1alpha1.PostgresConfig{Host: "pg", Database: "lk"},
+						},
+					},
+				}
+			}
+
+			It("wraps errMigrationFailed when the migration Job is terminally Failed", func() {
+				lk := newSpecLK()
+				hash := HashMigrationRelevantSpec(lk.Spec)
+				failedJob := &batchv1.Job{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      fmt.Sprintf("%s-migrate-%s", lk.Name, hash[:8]),
+						Namespace: lk.Namespace,
+					},
+					Status: batchv1.JobStatus{
+						Failed: 3,
+						Conditions: []batchv1.JobCondition{
+							{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded"},
+						},
+					},
+				}
+				c := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(failedJob).Build()
+				r := &LakekeeperReconciler{Client: c, Scheme: c.Scheme()}
+
+				_, err := r.needsMigration(context.Background(), lk)
+				Expect(err).To(HaveOccurred())
+				Expect(stderrors.Is(err, errMigrationFailed)).To(BeTrue(),
+					"a terminal Job failure must classify as a permanent migration failure")
+			})
+
+			It("does not wrap errMigrationFailed on a transient API error", func() {
+				lk := newSpecLK()
+				c := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).
+					WithInterceptorFuncs(interceptor.Funcs{
+						Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey,
+							obj client.Object, opts ...client.GetOption) error {
+							if _, ok := obj.(*batchv1.Job); ok {
+								return errors.NewServiceUnavailable("simulated transient API error")
+							}
+							return cl.Get(ctx, key, obj, opts...)
+						},
+					}).Build()
+				r := &LakekeeperReconciler{Client: c, Scheme: c.Scheme()}
+
+				_, err := r.needsMigration(context.Background(), lk)
+				Expect(err).To(HaveOccurred())
+				Expect(stderrors.Is(err, errMigrationFailed)).To(BeFalse(),
+					"a transient API error must not be treated as a permanent migration failure")
 			})
 		})
 	})

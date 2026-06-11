@@ -17,11 +17,14 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	lakekeeperv1alpha1 "github.com/lakekeeper/lakekeeper-operator/api/v1alpha1"
 )
@@ -213,5 +216,24 @@ var _ = Describe("migration hash invariance under maintenance flag (unit)", func
 	It("never injects the maintenance flag into the migrate-Job env (buildEnvVars)", func() {
 		Expect(toEnvMap(r.buildEnvVars(lk))).NotTo(HaveKey("LAKEKEEPER__MAINTENANCE_MODE"),
 			"the migrate Job must be free to write the schema, so it must not run read-only")
+	})
+})
+
+// The unknown-phase default branch in reconcileUpgrade is unreachable through the
+// API (status.upgradePhase carries an Enum validation marker), so it is exercised
+// here with a nil-client reconciler — the branch makes no client calls.
+var _ = Describe("reconcileUpgrade unknown-phase reset (unit)", func() {
+	It("clears an out-of-enum phase and hands control back to the normal path", func() {
+		r := &LakekeeperReconciler{}
+		lk := minimalLakekeeper()
+		lk.Status.UpgradePhase = lakekeeperv1alpha1.UpgradePhase("Frobnicating")
+		lk.Status.UpgradeTargetImage = lk.Spec.Image // matches spec, so the re-edit guard does not fire first
+
+		result, done, err := r.reconcileUpgrade(context.Background(), lk)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(done).To(BeFalse(), "an unknown phase must defer to the normal reconcile path")
+		Expect(result).To(Equal(ctrl.Result{}))
+		Expect(lk.Status.UpgradePhase).To(BeEmpty())
+		Expect(lk.Status.UpgradeTargetImage).To(BeEmpty())
 	})
 })
