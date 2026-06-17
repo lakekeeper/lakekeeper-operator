@@ -36,6 +36,10 @@ spec:
       jsonPath: .status.bootstrappedAt
       name: Bootstrapped
       type: date
+    - description: In-progress upgrade phase
+      jsonPath: .status.upgradePhase
+      name: Upgrade
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -867,6 +871,26 @@ spec:
                     minimum: 1
                     type: integer
                 type: object
+              upgrade:
+                description: |-
+                  Upgrade configures how version upgrades are sequenced.
+                  Defaults to the ReadOnlyMigration strategy when omitted.
+                properties:
+                  strategy:
+                    allOf:
+                    - enum:
+                      - ReadOnlyMigration
+                      - Simple
+                    - enum:
+                      - ReadOnlyMigration
+                      - Simple
+                    default: ReadOnlyMigration
+                    description: |-
+                      Strategy selects the upgrade choreography.
+                      ReadOnlyMigration (default) gates writes behind read-only maintenance mode
+                      during the migration window; Simple uses the legacy migrate-then-deploy path.
+                    type: string
+                type: object
             required:
             - authorization
             - database
@@ -959,6 +983,21 @@ spec:
               serverID:
                 description: ServerID is the Lakekeeper server's unique UUID, set
                   after a successful bootstrap.
+                type: string
+              upgradePhase:
+                description: |-
+                  UpgradePhase tracks the operator's position in the read-only-gated upgrade
+                  choreography. An empty value means no upgrade is in progress.
+                enum:
+                - Quiescing
+                - Migrating
+                - RollingOut
+                type: string
+              upgradeTargetImage:
+                description: |-
+                  UpgradeTargetImage records the spec.image an in-flight upgrade is converging
+                  toward. Used to detect a mid-upgrade re-edit of spec.image and reset the
+                  state machine. Empty when no upgrade is in progress.
                 type: string
             type: object
         type: object
