@@ -338,10 +338,15 @@ Phase        Deployment pods run      Mode        DB schema   migrate Job
 ──────────────────────────────────────────────────────────────────────
 (start)      image N                  read-write  N           —
 Quiescing    image N + MAINTENANCE    read-only   N           —
-Migrating    image N (read-only)      read-only   N → N+1     Job(image N+1)
+Migrating    image N + MAINTENANCE    read-only   N → N+1     Job(image N+1)
 RollingOut   image N+1 (flag removed)  read-write  N+1         —
 (done)       image N+1                 read-write  N+1         —
 ```
+
+The `Migrating` phase does not re-render the Deployment: it stays exactly as
+`Quiescing` left it (image N with `MAINTENANCE_MODE`), and only the migration Job
+runs against image N+1. The Deployment is re-rendered again only on entry to
+`RollingOut`.
 
 The quiesce step runs only when **all** of: a migration is needed, a Deployment
 already exists on an image different from `spec.image`, desired replicas > 0, and
@@ -366,10 +371,12 @@ tracks the goal, and a change is detected and the machine restarts toward the ne
 
 ### Interactions
 
-- **Version detection.** On entering an upgrade the operator probes
-  `GET /management/v1/info`. If the running version predates v0.12.3 it sets an
-  `UpgradeWarning` condition (read-only gating may be ineffective) but still
-  proceeds — the probe is best-effort and never blocks.
+- **Version detection.** The operator probes `GET /management/v1/info` **once**, on
+  entry into the upgrade (not on every reconcile). If the running version predates
+  v0.12.3 it sets an informational `UpgradeWarning` condition (read-only gating may
+  be ineffective). The warning is purely advisory: it **never gates** the upgrade,
+  which proceeds regardless. The probe is best-effort and stays silent if it fails
+  or the version is unparseable.
 - **Bootstrap.** Detection (`GET /management/v1/info`) is unaffected by read-only
   mode, so it keeps working. Auto-bootstrap's mutating `POST` is deferred while an
   upgrade holds the server read-only (`Bootstrapped=False/PausedDuringUpgrade`).
