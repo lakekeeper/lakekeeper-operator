@@ -50,6 +50,14 @@ kind load docker-image example.com/lakekeeper-operator:v0.0.1 --name lakekeeper-
 KIND_CLUSTER=my-custom-kind go test -v ./test/e2e
 ```
 
+> **podman note:** `kind load docker-image` is broken with podman. When
+> `CONTAINER_TOOL=podman`, save the image to an archive and load that instead:
+>
+> ```bash
+> podman save example.com/lakekeeper-operator:v0.0.1 -o operator.tar
+> kind load image-archive operator.tar --name lakekeeper-operator-test-e2e
+> ```
+
 ### k3d (Recommended for fast local dev)
 ```bash
 # Create k3d cluster (standard naming - auto-detects)
@@ -215,6 +223,7 @@ export IMAGE_LOAD_SKIP=true
 
 # Then manually load based on your cluster:
 kind load docker-image example.com/lakekeeper-operator:v0.0.1 --name <cluster-name>
+# (with podman, use podman save + kind load image-archive instead — see the Kind section above)
 # OR
 k3d image import example.com/lakekeeper-operator:v0.0.1 --cluster <cluster-name>
 # OR
@@ -238,13 +247,4 @@ docker push myregistry/lakekeeper-operator:v0.0.1  # For cloud
 - kubectl (required)
 - docker or podman (for building images)
 - **One of**: kind, k3d, minikube, or cloud cluster access
-- go 1.24+ (for running tests
-**Images**:
-- Operator: Built locally and loaded to cluster
-- Lakekeeper: `quay.io/lakekeeper/catalog:latest`
-- PostgreSQL: `postgres:16-alpine`
-
-**Tools**:
-- kubectl
-- Kind (or alternative cluster)
-- Docker (for image building)
+- go 1.24+ (for running tests)
