@@ -114,6 +114,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 
 .PHONY: test-focus
 test-focus: setup-envtest ## Fast inner-loop run of a Ginkgo focus (skips codegen). Usage: make test-focus FOCUS='deploymentRolloutComplete'
+	@test -n "$(strip $(FOCUS))" || { echo "FOCUS is required, e.g. make test-focus FOCUS='deploymentRolloutComplete'"; exit 1; }
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -count=1 ./internal/controller/... -args -ginkgo.focus='$(FOCUS)'
 
 # TODO(user): To use a different vendor for e2e tests, the tests are now cluster-agnostic!
