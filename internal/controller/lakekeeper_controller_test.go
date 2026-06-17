@@ -237,7 +237,8 @@ var _ = Describe("Lakekeeper Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-lakekeeper"
 
-		ctx := context.Background()
+		// Per-spec context, freshly assigned in BeforeEach so specs never share one.
+		var ctx context.Context
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
@@ -245,6 +246,8 @@ var _ = Describe("Lakekeeper Controller", func() {
 		}
 
 		BeforeEach(func() {
+			ctx = context.Background()
+
 			By("Creating the required secrets")
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{

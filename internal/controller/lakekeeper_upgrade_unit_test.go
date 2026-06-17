@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 
@@ -37,6 +38,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	lakekeeperv1alpha1 "github.com/lakekeeper/lakekeeper-operator/api/v1alpha1"
+)
+
+// Shared literals for the upgrade unit specs (kept as constants to satisfy goconst).
+const (
+	unitNamespace     = "default"
+	unitImageNp1      = "ghcr.io/lakekeeper/catalog:v0.12.4"
+	unitClosedBaseURL = "http://127.0.0.1:1"
 )
 
 // minimalLakekeeper returns a spec sufficient for the env-building helpers.
@@ -254,6 +262,7 @@ var _ = DescribeTable("versionOlderThan (unit)",
 	Entry("build metadata is stripped", "0.12.4+build7", "0.12.3", false, true),
 	Entry("unparseable version reports ok=false", "not-a-version", "0.12.3", false, false),
 	Entry("empty version reports ok=false", "", "0.12.3", false, false),
+	Entry("four-part version reports ok=false", "1.2.3.4", "0.12.3", false, false),
 )
 
 var _ = Describe("migration hash invariance under maintenance flag (unit)", func() {
@@ -335,7 +344,7 @@ var _ = Describe("reconcileUpgrade entry-path error handling (unit)", func() {
 	It("clears stale upgrade bookkeeping and reports NotUpgrading when no upgrade applies", func() {
 		lk := minimalLakekeeper()
 		lk.Name = "entry-stale"
-		lk.Namespace = "default"
+		lk.Namespace = unitNamespace
 		// Phase already empty, but a target image and an Upgrading=True condition linger
 		// (e.g. just after an upgrade settled). The target matches spec.Image, so the
 		// mid-flight re-edit guard does not fire — the cleanup branch must.
@@ -418,5 +427,278 @@ var _ = Describe("reconcileUpgrade unknown-phase reset (unit)", func() {
 		Expect(result).To(Equal(ctrl.Result{}))
 		Expect(lk.Status.UpgradePhase).To(BeEmpty())
 		Expect(lk.Status.UpgradeTargetImage).To(BeEmpty())
+	})
+})
+
+// upgradeUnitClient builds a fake client with the Lakekeeper status subresource
+// enabled. The default scheme (scheme.Scheme) is populated with the Lakekeeper
+// types by the suite's BeforeSuite, so no explicit scheme registration is needed —
+// these remain pure unit specs (fake client, no envtest API server, no Reconcile).
+func upgradeUnitClient(objs ...client.Object) client.Client {
+	return fake.NewClientBuilder().
+		WithObjects(objs...).
+		WithStatusSubresource(&lakekeeperv1alpha1.Lakekeeper{}).
+		Build()
+}
+
+var _ = Describe("reconcileQuiescing drift guards (unit)", func() {
+	It("advances to Migrating when the live Deployment has no lakekeeper container (empty image)", func() {
+		// liveDeploymentImage reports ("", true, nil) for a Deployment that exists but
+		// has no "lakekeeper" container. The quiesce drift check must treat an empty
+		// live image as drift and advance to Migrating rather than rendering an empty
+		// image and stalling forever.
+		lk := minimalLakekeeper()
+		lk.Name = "quiesce-noimage"
+		lk.Namespace = unitNamespace
+		lk.Spec.Image = unitImageNp1
+		lk.Status.UpgradePhase = lakekeeperv1alpha1.UpgradePhaseQuiescing
+		lk.Status.UpgradeTargetImage = lk.Spec.Image
+
+		dep := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: lk.Name, Namespace: lk.Namespace},
+			Spec: appsv1.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "not-lakekeeper", Image: "x"}},
+					},
+				},
+			},
+		}
+		c := upgradeUnitClient(lk, dep)
+		r := &LakekeeperReconciler{Client: c, Scheme: c.Scheme()}
+
+		_, done, err := r.reconcileQuiescing(context.Background(), lk)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(done).To(BeTrue())
+		Expect(lk.Status.UpgradePhase).To(Equal(lakekeeperv1alpha1.UpgradePhaseMigrating),
+			"an empty live image must be treated as drift and advance to Migrating, not render an empty image")
+	})
+})
+
+var _ = Describe("advanceTo (unit)", func() {
+	It("re-asserts Migrated=True and the Job name when transitioning out of Migrating to RollingOut", func() {
+		// reconcileMigration writes Migrated=True best-effort; if that write is dropped,
+		// advanceTo must re-assert it in its single status write so the condition cannot
+		// flap on the Migrating→RollingOut transition.
+		lk := minimalLakekeeper()
+		lk.Name = "advance-mig"
+		lk.Namespace = unitNamespace
+		lk.Status.UpgradePhase = lakekeeperv1alpha1.UpgradePhaseMigrating
+		// Migrated condition and MigrationJob deliberately absent (dropped best-effort write).
+		c := upgradeUnitClient(lk)
+		r := &LakekeeperReconciler{Client: c, Scheme: c.Scheme()}
+
+		_, done, err := r.advanceTo(context.Background(), lk, lakekeeperv1alpha1.UpgradePhaseRollingOut, "rolling out")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(done).To(BeTrue())
+		Expect(lk.Status.UpgradePhase).To(Equal(lakekeeperv1alpha1.UpgradePhaseRollingOut))
+		Expect(meta.IsStatusConditionTrue(lk.Status.Conditions, TypeMigrated)).To(BeTrue(),
+			"leaving Migrating must re-assert Migrated=True so a dropped best-effort write cannot leave it flapping")
+		expectedJob := fmt.Sprintf("%s-migrate-%s", lk.Name, HashMigrationRelevantSpec(lk.Spec)[:8])
+		Expect(lk.Status.MigrationJob).To(Equal(expectedJob),
+			"leaving Migrating must ensure the MigrationJob name is recorded")
+	})
+
+	It("does not pre-assert Migrated when entering Migrating from Quiescing", func() {
+		lk := minimalLakekeeper()
+		lk.Name = "advance-quiesce"
+		lk.Namespace = unitNamespace
+		lk.Status.UpgradePhase = lakekeeperv1alpha1.UpgradePhaseQuiescing
+		c := upgradeUnitClient(lk)
+		r := &LakekeeperReconciler{Client: c, Scheme: c.Scheme()}
+
+		_, _, err := r.advanceTo(context.Background(), lk, lakekeeperv1alpha1.UpgradePhaseMigrating, "migrating")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(meta.IsStatusConditionTrue(lk.Status.Conditions, TypeMigrated)).To(BeFalse(),
+			"entering Migrating must not pre-assert Migrated=True before the migration has run")
+	})
+})
+
+var _ = Describe("enterUpgradeIfNeeded concurrent migration guard (unit)", func() {
+	It("defers entering Quiescing while a previous image's migration Job is still in-flight", func() {
+		lk := minimalLakekeeper()
+		lk.Name = "concurrent-mig"
+		lk.Namespace = unitNamespace
+		lk.Spec.Image = unitImageNp1 // new target N+1
+
+		// A live Deployment on the old image N (so quiesceRequired holds: it exists on a
+		// different image with replicas > 0 under the default ReadOnlyMigration strategy).
+		oldImage := "ghcr.io/lakekeeper/catalog:v0.12.3"
+		dep := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: lk.Name, Namespace: lk.Namespace},
+			Spec: appsv1.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "lakekeeper", Image: oldImage}},
+					},
+				},
+			},
+		}
+
+		// An in-flight migration Job for the OLD image (different spec hash, still active).
+		oldSpec := lk.Spec
+		oldSpec.Image = oldImage
+		oldHash := HashMigrationRelevantSpec(oldSpec)
+		oldJob := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("%s-migrate-%s", lk.Name, oldHash[:8]),
+				Namespace: lk.Namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/component": "migration",
+					"app.kubernetes.io/instance":  lk.Name,
+				},
+			},
+			Status: batchv1.JobStatus{Active: 1},
+		}
+
+		c := upgradeUnitClient(lk, dep, oldJob)
+		r := &LakekeeperReconciler{
+			Client: c,
+			Scheme: c.Scheme(),
+			// A closed port keeps the version probe fast in case the guard does not fire.
+			getBaseURL: func(_ *lakekeeperv1alpha1.Lakekeeper) string { return unitClosedBaseURL },
+		}
+
+		result, done, err := r.enterUpgradeIfNeeded(context.Background(), lk)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(done).To(BeTrue(), "the guard must own the reconcile cycle and requeue")
+		Expect(result.RequeueAfter).To(Equal(upgradeRequeueAfter))
+		Expect(lk.Status.UpgradePhase).To(BeEmpty(),
+			"must not enter Quiescing while a previous image's migration Job is still in-flight")
+	})
+
+	It("enters Quiescing once the previous migration Jobs have all completed", func() {
+		lk := minimalLakekeeper()
+		lk.Name = "concurrent-done"
+		lk.Namespace = unitNamespace
+		lk.Spec.Image = unitImageNp1
+
+		oldImage := "ghcr.io/lakekeeper/catalog:v0.12.3"
+		dep := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: lk.Name, Namespace: lk.Namespace},
+			Spec: appsv1.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "lakekeeper", Image: oldImage}},
+					},
+				},
+			},
+		}
+		oldSpec := lk.Spec
+		oldSpec.Image = oldImage
+		oldHash := HashMigrationRelevantSpec(oldSpec)
+		oldJob := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("%s-migrate-%s", lk.Name, oldHash[:8]),
+				Namespace: lk.Namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/component": "migration",
+					"app.kubernetes.io/instance":  lk.Name,
+				},
+			},
+			Status: batchv1.JobStatus{Succeeded: 1}, // completed
+		}
+
+		c := upgradeUnitClient(lk, dep, oldJob)
+		r := &LakekeeperReconciler{
+			Client:     c,
+			Scheme:     c.Scheme(),
+			getBaseURL: func(_ *lakekeeperv1alpha1.Lakekeeper) string { return unitClosedBaseURL },
+		}
+
+		_, done, err := r.enterUpgradeIfNeeded(context.Background(), lk)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(done).To(BeTrue())
+		Expect(lk.Status.UpgradePhase).To(Equal(lakekeeperv1alpha1.UpgradePhaseQuiescing),
+			"a completed previous migration must not block entering Quiescing")
+	})
+})
+
+var _ = Describe("reconcileUpgrade entry-path permanent migration failure (unit)", func() {
+	It("defers to the normal path (done=false) when the current spec's migration has permanently failed", func() {
+		// A terminally-failed migration Job for the current spec makes needsMigration
+		// return errMigrationFailed. The upgrade entry must not start a new upgrade on
+		// top of it — the normal migration path surfaces the failure.
+		lk := minimalLakekeeper()
+		lk.Name = "entry-migfailed"
+		lk.Namespace = unitNamespace
+		hash := HashMigrationRelevantSpec(lk.Spec)
+		failedJob := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("%s-migrate-%s", lk.Name, hash[:8]),
+				Namespace: lk.Namespace,
+			},
+			Status: batchv1.JobStatus{
+				Failed: migrationJobBackoffLimit,
+				Conditions: []batchv1.JobCondition{
+					{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded"},
+				},
+			},
+		}
+		c := upgradeUnitClient(lk, failedJob)
+		r := &LakekeeperReconciler{Client: c, Scheme: c.Scheme()}
+
+		_, done, err := r.reconcileUpgrade(context.Background(), lk)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(done).To(BeFalse(), "a permanent migration failure is surfaced by the normal path, not the upgrade entry")
+		Expect(lk.Status.UpgradePhase).To(BeEmpty())
+	})
+})
+
+var _ = Describe("rolloutComplete (unit)", func() {
+	It("returns an error when the live Deployment cannot be fetched", func() {
+		lk := minimalLakekeeper()
+		lk.Name = "rollout-geterr"
+		lk.Namespace = unitNamespace
+		c := fake.NewClientBuilder().
+			WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey,
+					obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*appsv1.Deployment); ok {
+						return apierrors.NewServiceUnavailable("simulated transient API error")
+					}
+					return cl.Get(ctx, key, obj, opts...)
+				},
+			}).Build()
+		r := &LakekeeperReconciler{Client: c, Scheme: c.Scheme()}
+
+		_, err := r.rolloutComplete(context.Background(), lk, "img:N+1")
+		Expect(err).To(HaveOccurred())
+	})
+})
+
+var _ = Describe("reconcileVersionWarning Version fallback (unit)", func() {
+	It("falls back to the deprecated Version field when LakekeeperVersion is empty", func() {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			// Old server: only the deprecated plain `version` field is populated.
+			_ = json.NewEncoder(w).Encode(infoResponse{Bootstrapped: true, ServerID: "srv", Version: "0.12.2"})
+		}))
+		defer ts.Close()
+
+		lk := minimalLakekeeper()
+		lk.Name = "ver-fallback"
+		r := &LakekeeperReconciler{getBaseURL: func(_ *lakekeeperv1alpha1.Lakekeeper) string { return ts.URL }}
+
+		r.reconcileVersionWarning(context.Background(), lk)
+
+		warn := meta.FindStatusCondition(lk.Status.Conditions, TypeUpgradeWarning)
+		Expect(warn).NotTo(BeNil())
+		Expect(warn.Status).To(Equal(metav1.ConditionTrue))
+		Expect(warn.Reason).To(Equal("MaintenanceModeUnsupported"))
+	})
+})
+
+var _ = Describe("degradedMigrationMessage (unit)", func() {
+	It("returns the plain permanent-failure message outside the Migrating phase", func() {
+		lk := minimalLakekeeper()
+		lk.Status.UpgradePhase = ""
+		Expect(degradedMigrationMessage(lk)).To(Equal("Database migration failed permanently"))
+	})
+
+	It("returns read-only recovery guidance during the Migrating phase", func() {
+		lk := minimalLakekeeper()
+		lk.Status.UpgradePhase = lakekeeperv1alpha1.UpgradePhaseMigrating
+		Expect(degradedMigrationMessage(lk)).To(ContainSubstring("read-only maintenance mode"))
 	})
 })

@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -111,6 +112,18 @@ func (r *LakekeeperReconciler) enterUpgradeIfNeeded(ctx context.Context, lk *lak
 		return ctrl.Result{}, false, nil
 	}
 
+	// Don't start a new read-only upgrade while a previous image's migration Job is
+	// still in-flight: a rapid spec.image re-edit could otherwise run two migrate Jobs
+	// against the same database concurrently. Requeue until the older Job settles.
+	inFlight, err := r.previousMigrationInFlight(ctx, lk)
+	if err != nil {
+		return ctrl.Result{}, true, err
+	}
+	if inFlight {
+		logger.Info("Deferring upgrade: a previous migration Job is still in-flight")
+		return ctrl.Result{RequeueAfter: upgradeRequeueAfter}, true, nil
+	}
+
 	// Best-effort: warn if the running server predates MAINTENANCE_MODE support.
 	r.reconcileVersionWarning(ctx, lk)
 
@@ -143,7 +156,10 @@ func (r *LakekeeperReconciler) reconcileQuiescing(ctx context.Context, lk *lakek
 	// against the new image before any new-image pods can serve writes. Jumping
 	// straight to RollingOut would promote the image first and run the migration
 	// only afterwards via the normal tail, defeating the read-only gate.
-	if !exists || liveImage == lk.Spec.Image {
+	// liveImage == "" means the Deployment exists but has no "lakekeeper" container
+	// (liveDeploymentImage returns ("", true, nil)). Treat that as drift too: rendering
+	// deploymentIntent{image: ""} would never settle, stalling the upgrade.
+	if !exists || liveImage == "" || liveImage == lk.Spec.Image {
 		return r.advanceTo(ctx, lk, lakekeeperv1alpha1.UpgradePhaseMigrating,
 			"Deployment already on the target image; running migration before rollout")
 	}
@@ -232,6 +248,16 @@ func (r *LakekeeperReconciler) reconcileRollingOut(ctx context.Context, lk *lake
 func (r *LakekeeperReconciler) advanceTo(
 	ctx context.Context, lk *lakekeeperv1alpha1.Lakekeeper, phase lakekeeperv1alpha1.UpgradePhase, msg string,
 ) (ctrl.Result, bool, error) {
+	// Leaving Migrating means the migration has succeeded. reconcileMigration writes
+	// Migrated=True (and MigrationJob) best-effort; if that write was dropped, re-assert
+	// both here so this single status write carries them and the condition cannot flap.
+	if lk.Status.UpgradePhase == lakekeeperv1alpha1.UpgradePhaseMigrating &&
+		phase != lakekeeperv1alpha1.UpgradePhaseMigrating {
+		r.setCondition(lk, TypeMigrated, metav1.ConditionTrue, "MigrationSucceeded", "Database migration completed")
+		if lk.Status.MigrationJob == "" {
+			lk.Status.MigrationJob = fmt.Sprintf("%s-migrate-%s", lk.Name, HashMigrationRelevantSpec(lk.Spec)[:8])
+		}
+	}
 	lk.Status.UpgradePhase = phase
 	r.setCondition(lk, TypeUpgrading, metav1.ConditionTrue, string(phase), msg)
 	r.setCondition(lk, TypeReady, metav1.ConditionFalse, "Upgrading", "Upgrade in progress: "+string(phase))
@@ -269,6 +295,36 @@ func (r *LakekeeperReconciler) liveDeploymentImage(ctx context.Context, lk *lake
 	// Deployment exists; report its image (empty if it has no lakekeeper container).
 	image, _ := lakekeeperContainerImage(dep)
 	return image, true, nil
+}
+
+// previousMigrationInFlight reports whether a migration Job for a spec other than the
+// current one is still running for this instance. It is used to gate the start of a
+// read-only-gated upgrade so a rapid spec.image re-edit cannot run two migrate Jobs
+// against the same database concurrently. The current spec's Job (if any) is ignored —
+// only an older, not-yet-settled Job counts as in-flight.
+func (r *LakekeeperReconciler) previousMigrationInFlight(ctx context.Context, lk *lakekeeperv1alpha1.Lakekeeper) (bool, error) {
+	currentJobName := fmt.Sprintf("%s-migrate-%s", lk.Name, HashMigrationRelevantSpec(lk.Spec)[:8])
+
+	jobs := &batchv1.JobList{}
+	if err := r.List(ctx, jobs,
+		client.InNamespace(lk.Namespace),
+		client.MatchingLabels{
+			"app.kubernetes.io/component": "migration",
+			"app.kubernetes.io/instance":  lk.Name,
+		}); err != nil {
+		return false, fmt.Errorf("failed to list migration jobs: %w", err)
+	}
+
+	for i := range jobs.Items {
+		job := &jobs.Items[i]
+		if job.Name == currentJobName {
+			continue
+		}
+		if !isJobComplete(job) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // lakekeeperContainerImage returns the image of the "lakekeeper" container in dep.
@@ -414,9 +470,9 @@ func versionOlderThan(v, ref string) (older bool, ok bool) {
 }
 
 // parseVersion parses "MAJOR.MINOR.PATCH" (with optional leading 'v' and trailing
-// pre-release/build metadata) into a [3]int. Missing minor/patch default to 0.
-func parseVersion(v string) ([3]int, bool) {
-	var out [3]int
+// pre-release/build metadata) into a [3]int32. Missing minor/patch default to 0.
+func parseVersion(v string) ([3]int32, bool) {
+	var out [3]int32
 	v = strings.TrimSpace(v)
 	v = strings.TrimPrefix(v, "v")
 	if v == "" {
@@ -425,16 +481,18 @@ func parseVersion(v string) ([3]int, bool) {
 	if i := strings.IndexAny(v, "-+"); i >= 0 {
 		v = v[:i]
 	}
+	// strings.Split never returns an empty slice here (v is non-empty), so only the
+	// upper bound needs checking.
 	parts := strings.Split(v, ".")
-	if len(parts) == 0 || len(parts) > 3 {
+	if len(parts) > 3 {
 		return out, false
 	}
 	for i, p := range parts {
-		n, err := strconv.Atoi(p)
+		n, err := strconv.ParseInt(p, 10, 32)
 		if err != nil || n < 0 {
 			return out, false
 		}
-		out[i] = n
+		out[i] = int32(n)
 	}
 	return out, true
 }

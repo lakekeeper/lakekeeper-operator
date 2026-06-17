@@ -202,6 +202,41 @@ var _ = Describe("Lakekeeper upgrade choreography (integration)", func() {
 		return len(jobs.Items)
 	}
 
+	// completeAnyInFlightMigration marks every not-yet-finished migration Job for the
+	// instance as succeeded. Unlike completeMigrationJob (which targets the current
+	// spec's hash), this drives a *sequence* of migrations — e.g. N+1 then N+2 after a
+	// mid-flight re-edit — to completion regardless of which spec hash each carries.
+	completeAnyInFlightMigration := func(instance string) {
+		jobs := &batchv1.JobList{}
+		Expect(k8sClient.List(ctx, jobs,
+			client.InNamespace(namespace),
+			client.MatchingLabels{
+				"app.kubernetes.io/component": "migration",
+				"app.kubernetes.io/instance":  instance,
+			})).To(Succeed())
+		for i := range jobs.Items {
+			job := &jobs.Items[i]
+			if job.Status.Succeeded > 0 || isJobFailed(job) {
+				continue
+			}
+			now := metav1.Now()
+			job.Status.Active = 0
+			job.Status.Succeeded = 1
+			if job.Status.StartTime == nil {
+				job.Status.StartTime = &now
+			}
+			if job.Status.CompletionTime == nil {
+				job.Status.CompletionTime = &now
+			}
+			// K8s 1.33+ rejects Complete=True without a preceding SuccessCriteriaMet=True.
+			job.Status.Conditions = []batchv1.JobCondition{
+				{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue, LastTransitionTime: now},
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: now},
+			}
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+		}
+	}
+
 	reconcileUntilPhase := func(name string, phase lakekeeperv1alpha1.UpgradePhase) {
 		Eventually(func(g Gomega) {
 			_, err := reconcileOnce(name)
@@ -472,6 +507,91 @@ var _ = Describe("Lakekeeper upgrade choreography (integration)", func() {
 
 			By("converging to N+2")
 			driveUpgradeToCompletion(name, imageNp2)
+		})
+
+		It("retargets on a mid-Migrating re-edit (N→N+1→N+2) and converges to N+2", func() {
+			name := "upgrade-reedit-migrating"
+			lk := newLakekeeper(name, imageN, 1, "")
+			driveToSteady(lk)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, lk) })
+			imageNp2 := "ghcr.io/lakekeeper/catalog:v0.12.5"
+
+			By("starting an upgrade to N+1 and reaching Migrating")
+			toNp1 := getLK(name)
+			toNp1.Spec.Image = imageNp1
+			Expect(k8sClient.Update(ctx, toNp1)).To(Succeed())
+			reconcileUntilPhase(name, lakekeeperv1alpha1.UpgradePhaseQuiescing)
+			Eventually(func(g Gomega) {
+				_, err := reconcileOnce(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				simulateRolloutComplete(name)
+				g.Expect(getLK(name).Status.UpgradePhase).To(Equal(lakekeeperv1alpha1.UpgradePhaseMigrating))
+			}, timeout, interval).Should(Succeed())
+
+			By("ensuring the N+1 migrate Job exists and is in-flight")
+			Eventually(func(g Gomega) {
+				_, err := reconcileOnce(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				_, ok := migrationJobExists(getLK(name))
+				g.Expect(ok).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			By("re-editing to N+2 mid-Migrating")
+			toNp2 := getLK(name)
+			toNp2.Spec.Image = imageNp2
+			Expect(k8sClient.Update(ctx, toNp2)).To(Succeed())
+
+			By("deferring the new upgrade while the in-flight N+1 migration is still running")
+			Consistently(func(g Gomega) {
+				_, err := reconcileOnce(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(getLK(name).Status.UpgradeTargetImage).NotTo(Equal(imageNp2))
+			}, "1s", interval).Should(Succeed())
+
+			By("completing the in-flight N+1 migration, which releases the guard and retargets to N+2")
+			completeAnyInFlightMigration(name)
+			Eventually(func(g Gomega) {
+				_, err := reconcileOnce(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(getLK(name).Status.UpgradeTargetImage).To(Equal(imageNp2))
+			}, timeout, interval).Should(Succeed())
+
+			By("converging to N+2")
+			driveUpgradeToCompletion(name, imageNp2)
+		})
+
+		It("clears Upgrading and the phase when spec.image is reverted to the live image mid-Quiescing", func() {
+			name := "upgrade-revert"
+			lk := newLakekeeper(name, imageN, 1, "")
+			driveToSteady(lk)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, lk) })
+
+			By("entering Quiescing on an image upgrade to N+1")
+			toUpdate := getLK(name)
+			toUpdate.Spec.Image = imageNp1
+			Expect(k8sClient.Update(ctx, toUpdate)).To(Succeed())
+			reconcileUntilPhase(name, lakekeeperv1alpha1.UpgradePhaseQuiescing)
+			Expect(meta.IsStatusConditionTrue(getLK(name).Status.Conditions, TypeUpgrading)).To(BeTrue())
+
+			By("reverting spec.image back to the live image N mid-Quiescing")
+			toRevert := getLK(name)
+			toRevert.Spec.Image = imageN
+			Expect(k8sClient.Update(ctx, toRevert)).To(Succeed())
+
+			By("clearing the upgrade phase/target and reporting Upgrading=False (not leaking a stale True)")
+			Eventually(func(g Gomega) {
+				_, err := reconcileOnce(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				simulateRolloutComplete(name)
+				lk := getLK(name)
+				g.Expect(lk.Status.UpgradePhase).To(BeEmpty())
+				g.Expect(lk.Status.UpgradeTargetImage).To(BeEmpty())
+				g.Expect(meta.IsStatusConditionFalse(lk.Status.Conditions, TypeUpgrading)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			By("settling back on the old image with the maintenance flag removed")
+			Expect(getDeployment(name).Spec.Template.Spec.Containers[0].Image).To(Equal(imageN))
+			Expect(envOf(getDeployment(name))).NotTo(HaveKey("LAKEKEEPER__MAINTENANCE_MODE"))
 		})
 
 		It("is resumable across a fresh reconciler without creating duplicate Jobs", func() {
