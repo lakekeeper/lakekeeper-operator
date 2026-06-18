@@ -50,8 +50,13 @@ kind load docker-image example.com/lakekeeper-operator:v0.0.1 --name lakekeeper-
 KIND_CLUSTER=my-custom-kind go test -v ./test/e2e
 ```
 
-> **podman note:** `kind load docker-image` is broken with podman. When
-> `CONTAINER_TOOL=podman`, save the image to an archive and load that instead:
+> **podman note:** `kind load docker-image` is broken with podman (it reports an
+> already-present image as "not present locally"). The suite handles this
+> automatically: when `CONTAINER_TOOL=podman`, image loading falls back to
+> `podman save` + `kind load image-archive`, and the Makefile exports
+> `KIND_EXPERIMENTAL_PROVIDER=podman` so cluster creation and loading use the
+> podman provider. So `CONTAINER_TOOL=podman make test-e2e` works out of the box.
+> To load an image manually, the equivalent is:
 >
 > ```bash
 > podman save example.com/lakekeeper-operator:v0.0.1 -o operator.tar

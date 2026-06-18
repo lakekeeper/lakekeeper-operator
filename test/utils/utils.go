@@ -40,6 +40,10 @@ const (
 	ClusterTypeK3d      = "k3d"
 	ClusterTypeKind     = "kind"
 	ClusterTypeMinikube = "minikube"
+
+	// Container tool constants (mirrors the Makefile's CONTAINER_TOOL).
+	ContainerToolDocker = "docker"
+	ContainerToolPodman = "podman"
 )
 
 func warnError(err error) {
@@ -255,16 +259,65 @@ func detectClusterType() (string, string) {
 	return "unknown", contextName
 }
 
-// loadImageToKind loads an image to a kind cluster
+// loadImageToKind loads an image to a kind cluster.
+//
+// `kind load docker-image` is broken with podman: it reports an already-present
+// podman image as "not present locally" and exits non-zero. When the configured
+// container tool is podman, save the image to a temporary archive and load that
+// via `kind load image-archive`, which works.
 func loadImageToKind(imageName, clusterName string) error {
 	if clusterName == "" {
 		clusterName = "kind" // default
+	}
+
+	if containerTool() == ContainerToolPodman {
+		return loadImageToKindViaArchive(imageName, clusterName)
 	}
 
 	_, _ = fmt.Fprintf(GinkgoWriter, "Loading image to kind cluster '%s'...\n", clusterName)
 	cmd := exec.Command("kind", "load", "docker-image", imageName, "--name", clusterName)
 	_, err := Run(cmd)
 	return err
+}
+
+// loadImageToKindViaArchive is the podman-compatible kind image load: save the
+// image to a tar archive with podman, then `kind load image-archive`. It also
+// ensures kind uses the podman provider (Run propagates the process environment).
+func loadImageToKindViaArchive(imageName, clusterName string) error {
+	if os.Getenv("KIND_EXPERIMENTAL_PROVIDER") == "" {
+		_ = os.Setenv("KIND_EXPERIMENTAL_PROVIDER", ContainerToolPodman)
+	}
+
+	archive, err := os.CreateTemp("", "kind-image-*.tar")
+	if err != nil {
+		return fmt.Errorf("create temp image archive: %w", err)
+	}
+	archivePath := archive.Name()
+	_ = archive.Close()
+	defer func() { _ = os.Remove(archivePath) }()
+
+	_, _ = fmt.Fprintf(GinkgoWriter,
+		"Loading image to kind cluster '%s' via archive (podman)...\n", clusterName)
+
+	saveCmd := exec.Command(ContainerToolPodman, "save", imageName, "-o", archivePath)
+	if _, err := Run(saveCmd); err != nil {
+		return fmt.Errorf("podman save %s: %w", imageName, err)
+	}
+
+	loadCmd := exec.Command("kind", "load", "image-archive", archivePath, "--name", clusterName)
+	if _, err := Run(loadCmd); err != nil {
+		return fmt.Errorf("kind load image-archive: %w", err)
+	}
+	return nil
+}
+
+// containerTool returns the configured container tool (CONTAINER_TOOL env var),
+// defaulting to docker to match the Makefile's CONTAINER_TOOL ?= docker.
+func containerTool() string {
+	if t := os.Getenv("CONTAINER_TOOL"); t != "" {
+		return t
+	}
+	return ContainerToolDocker
 }
 
 // loadImageToK3d loads an image to a k3d cluster

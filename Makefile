@@ -65,6 +65,13 @@ endif
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
 
+# kind uses the Docker provider by default. When building with podman, kind needs
+# the experimental podman provider for both cluster creation and image loading.
+# Export it (overridable) so it also reaches the `go test` e2e subprocess.
+ifeq ($(CONTAINER_TOOL),podman)
+export KIND_EXPERIMENTAL_PROVIDER ?= podman
+endif
+
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail

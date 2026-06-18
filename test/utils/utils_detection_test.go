@@ -93,3 +93,24 @@ func TestDetectClusterType_EnvironmentOverridesContext(t *testing.T) {
 		t.Errorf("With K3D_CLUSTER=custom-name, expected cluster=custom-name, got %v", gotCluster)
 	}
 }
+
+func TestContainerTool(t *testing.T) {
+	orig, had := os.LookupEnv("CONTAINER_TOOL")
+	defer func() {
+		if had {
+			_ = os.Setenv("CONTAINER_TOOL", orig)
+		} else {
+			_ = os.Unsetenv("CONTAINER_TOOL")
+		}
+	}()
+
+	_ = os.Unsetenv("CONTAINER_TOOL")
+	if got := containerTool(); got != ContainerToolDocker {
+		t.Errorf("containerTool() default = %q, want %q", got, ContainerToolDocker)
+	}
+
+	_ = os.Setenv("CONTAINER_TOOL", ContainerToolPodman)
+	if got := containerTool(); got != ContainerToolPodman {
+		t.Errorf("containerTool() with CONTAINER_TOOL=podman = %q, want %q", got, ContainerToolPodman)
+	}
+}
