@@ -30,3 +30,10 @@ jobs:
         run: |
           go mod tidy
           make test-e2e
+
+      - name: Ensure the working tree is clean after e2e
+        run: |
+          git diff --exit-code || {
+            echo "::error::'make test-e2e' left tracked files modified (e.g. config/manager/kustomization.yaml via 'kustomize edit set image'). The e2e suite must restore anything it edits.";
+            exit 1;
+          }

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -130,9 +131,24 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to label namespace")
 
 	By("deploying the controller-manager for entire suite")
+	// `make deploy` runs `kustomize edit set image`, which rewrites
+	// config/manager/kustomization.yaml in place. Snapshot it and restore it once the
+	// manifests are applied, so a test run never leaves the tracked file dirty.
+	projectDir, err := utils.GetProjectDir()
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to resolve project dir")
+	kustomizationPath := filepath.Join(projectDir, "config", "manager", "kustomization.yaml")
+	kustomizationInfo, err := os.Stat(kustomizationPath)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to stat config/manager/kustomization.yaml")
+	kustomizationBackup, err := os.ReadFile(kustomizationPath)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to snapshot config/manager/kustomization.yaml")
+
 	cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage))
-	_, err = utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to deploy controller-manager")
+	_, deployErr := utils.Run(cmd)
+	// Restore regardless of deploy outcome: `make deploy` edits the file before it
+	// applies, so the edit lands even when the apply fails.
+	restoreErr := os.WriteFile(kustomizationPath, kustomizationBackup, kustomizationInfo.Mode().Perm())
+	ExpectWithOffset(1, deployErr).NotTo(HaveOccurred(), "Failed to deploy controller-manager")
+	ExpectWithOffset(1, restoreErr).NotTo(HaveOccurred(), "Failed to restore config/manager/kustomization.yaml")
 
 	By("waiting for controller-manager to be ready")
 	Eventually(func(g Gomega) {
